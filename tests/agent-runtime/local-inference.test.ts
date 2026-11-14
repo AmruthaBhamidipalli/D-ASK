@@ -148,6 +148,27 @@ async function main(): Promise<void> {
     const dead = new LlamaServerModel({ endpoint: { baseUrl: `http://127.0.0.1:${deadPort}`, apiKey: KEY } });
     const e = await expectError(dead.generateJson(planReq()));
     check(kindOf(e) === "unavailable" && /ECONNREFUSED/.test(e!.message), "M5 connection refused → unavailable", e?.message);
+    let acquires = 0;
+    const counted = new LlamaServerModel({ endpoint: async () => { acquires++; return { baseUrl: `http://127.0.0.1:${deadPort}`, apiKey: KEY }; } });
+    await expectError(counted.generateJson(planReq()));
+    check(acquires === 1, "M5b a refused connection is not retried", acquires);
+  }
+
+  {
+    // 2026-11-14 regression under load: the server reset the connection (crash/restart). One retry, with the endpoint acquired again.
+    let resets = 1, acquires = 0;
+    fake.setHandler((_q, _b, res) => { if (resets-- > 0) { res.socket?.destroy(); return; } json(res, 200, completion({ ok: true })); });
+    const m = new LlamaServerModel({ endpoint: async () => { acquires++; return { baseUrl: fake.url, apiKey: KEY }; } });
+    const out = await m.generateJson(planReq());
+    check(JSON.stringify(out) === JSON.stringify({ ok: true }) && acquires === 2, "M5c a reset connection is retried ONCE with a freshly acquired endpoint", { out, acquires });
+    resets = 5; acquires = 0;
+    const e2 = await expectError(m.generateJson(planReq()));
+    check(kindOf(e2) === "unavailable" && acquires === 2, "M5d a second reset fails honestly (no retry loop)", { acquires, msg: e2?.message });
+    const ac = new AbortController();
+    resets = 5; acquires = 0;
+    fake.setHandler((_q, _b, res) => { ac.abort(); res.socket?.destroy(); });
+    const e3 = await expectError(m.generateJson(planReq(ac.signal)));
+    check(acquires === 1 && kindOf(e3) === "cancelled", "M5e a cancelled request is never retried", { acquires, kind: kindOf(e3) });
   }
 
   {
@@ -357,6 +378,42 @@ async function main(): Promise<void> {
   const mkSup = (opts: Partial<ConstructorParameters<typeof InferenceSupervisor>[0]> = {}, fakeEnv: Record<string, string> = {}) =>
     new InferenceSupervisor({ root: tmp, manifest, modelId: "m", memoryProbe: plenty, launcher: launcher(fakeEnv), restartBackoffMs: 50, readyTimeoutMs: 10_000, idleUnloadMs: 0, ...opts });
   const procAlive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+
+  // U0 (2026-11-14 regression): orphan cleanup must never kill ANOTHER RUNNING host's server. Real processes: the "llama-server" is a
+  // copy of PING.EXE so the image check matches; one server's owner host is alive, one's is gone, one comes from an old ownerless file.
+  if (process.platform === "win32") {
+    const t2 = fs.mkdtempSync(path.join(os.tmpdir(), "dask-orphan-"));
+    fs.mkdirSync(path.join(t2, "rt")); fs.mkdirSync(path.join(t2, "models")); fs.mkdirSync(path.join(t2, "local-inference", "run"), { recursive: true });
+    const exe2 = path.join(t2, "rt", "llama-server.exe");
+    fs.copyFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "PING.EXE"), exe2);
+    fs.copyFileSync(path.join(tmp, "rt", "ggml.dll"), path.join(t2, "rt", "ggml.dll"));
+    fs.copyFileSync(path.join(tmp, "models", "m.gguf"), path.join(t2, "models", "m.gguf"));
+    const m2: ArtifactManifest = { ...manifest, runtime: { ...manifest.runtime, files: { ...manifest.runtime.files, "llama-server.exe": sha(exe2) } } };
+    const server = () => spawn(exe2, ["-n", "300", "127.0.0.1"], { stdio: "ignore", windowsHide: true });
+    const liveOwner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { stdio: "ignore", windowsHide: true });
+    const deadOwner = spawn(process.execPath, ["-e", ""], { stdio: "ignore", windowsHide: true });
+    await new Promise((r) => deadOwner.once("exit", r));
+    const a = server(), b = server(), c = server();
+    await sleep(500);
+    const run = path.join(t2, "local-inference", "run");
+    fs.writeFileSync(path.join(run, `llama-server-m-host${liveOwner.pid}.json`), JSON.stringify({ pid: a.pid, ownerPid: liveOwner.pid }));
+    fs.writeFileSync(path.join(run, `llama-server-m-host${deadOwner.pid}.json`), JSON.stringify({ pid: b.pid, ownerPid: deadOwner.pid }));
+    fs.writeFileSync(path.join(run, "llama-server-m.json"), JSON.stringify({ pid: c.pid }));   // the pre-fix format
+    const s0 = new InferenceSupervisor({ root: t2, manifest: m2, modelId: "m", memoryProbe: plenty, launcher: launcher(), restartBackoffMs: 50, readyTimeoutMs: 10_000, idleUnloadMs: 0 });
+    try {
+      await s0.start();
+      await sleep(300);
+      check(procAlive(a.pid ?? null) && fs.existsSync(path.join(run, `llama-server-m-host${liveOwner.pid}.json`)), "U0a a server whose host is still running is left alone (not an orphan)");
+      check(!procAlive(b.pid ?? null), "U0b a server whose host is gone is killed as an orphan");
+      check(!procAlive(c.pid ?? null), "U0c a server from an old ownerless PID file is still cleaned up");
+      check(fs.existsSync(path.join(run, `llama-server-m-host${process.pid}.json`)), "U0d this host records its own server in its own PID file");
+    } finally {
+      await s0.stop().catch(() => {});
+      for (const p of [a, b, c, liveOwner]) { try { p.kill(); } catch { /* gone */ } }
+      await sleep(800);
+      try { fs.rmSync(t2, { recursive: true, force: true }); } catch { /* a process still releasing the copied exe: temp folder only */ }
+    }
+  }
 
   const prevLlama = process.env.LLAMA_ARG_N_GPU_LAYERS;
   process.env.LLAMA_ARG_N_GPU_LAYERS = "77";

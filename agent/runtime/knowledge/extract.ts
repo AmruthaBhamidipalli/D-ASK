@@ -5,6 +5,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { spawnSync } from "node:child_process";
 import { decodeText, redactSecrets } from "../tools/fileAccess";
 import { extractPdfText } from "./pdf";
 import { readZipFile } from "./zip";
@@ -22,7 +25,48 @@ export interface Block {
   symbol: string | null;
 }
 
-export interface ParsedDoc { title: string; format: DocFormat; blocks: Block[]; pages: number | null; redactions: number }
+export interface ParsedDoc { title: string; format: DocFormat; blocks: Block[]; pages: number | null; redactions: number; ocrPages?: number[] }
+
+// ── Scanned PDF pages: offline OCR (2026-11-15) ─────────────────────────────
+// Pages without a text layer are rendered by Windows' own PDF renderer and recognised by the Windows OCR engine (dask-ocr --pdf):
+// both ship with Windows, nothing is downloaded, no network. Recognised text keeps its page number and is marked in the heading path
+// ("… > text recognised by OCR") so every citation of it says so. DASK_KNOWLEDGE_OCR=0 switches it off.
+export const OCR_MARK = "text recognised by OCR";
+
+export function findOcrHelper(): string | null {
+  if (process.env.DASK_KNOWLEDGE_OCR === "0") return null;
+  const rel = path.join("src", "hud-native", "target", "release", "dask-ocr.exe");
+  const candidates = [
+    process.env.DASK_OCR_HELPER,
+    path.resolve(path.dirname(process.execPath), "..", "..", rel),            // the package: <root>\runtime\node\node.exe
+    path.resolve(__dirname, "..", "..", "..", "..", "..", rel),               // compiled host: <repo>\dist\agent-host\agent\runtime\knowledge
+    path.resolve(__dirname, "..", "..", "..", rel),                           // sources (tsx): <repo>\agent\runtime\knowledge
+  ];
+  for (const c of candidates) if (c && process.platform === "win32" && fs.existsSync(c)) return c;
+  return null;
+}
+
+/** OCR of the given 1-based pages; a page that yields nothing is simply left out. Throws only when the helper itself fails. */
+export function ocrPdfPages(buf: Buffer, pages: number[], helper: string | null = findOcrHelper()): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  if (!helper || pages.length === 0) return out;
+  const tmp = path.join(os.tmpdir(), `dask-ocr-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`);
+  fs.writeFileSync(tmp, buf);
+  try {
+    const r = spawnSync(helper, ["--pdf", tmp, "--pages", pages.join(",")], { encoding: "utf8", windowsHide: true, timeout: 20_000 + 6_000 * pages.length, maxBuffer: 16 * 1024 * 1024 });
+    const line = (r.stdout ?? "").trim().split("\n").pop() ?? "";
+    let res: { ok?: boolean; error?: string; pages?: { page: number; lines: { text: string }[] }[] };
+    try { res = JSON.parse(line); } catch { throw new Error(r.error ? r.error.message : "the OCR helper gave no answer"); }
+    if (!res.ok) throw new Error(res.error ?? "OCR failed");
+    for (const p of res.pages ?? []) {
+      const lines = p.lines.map((l) => l.text.trim()).filter(Boolean);
+      if (lines.length) out.set(p.page, lines);
+    }
+    return out;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* temp file */ }
+  }
+}
 
 const CODE_EXT = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "cs", "rs", "go", "java", "kt", "swift", "rb", "php", "c", "h", "cpp", "hpp", "cc", "ps1", "psm1", "sh", "bash", "sql", "css", "scss", "lua", "r", "scala", "dart", "vue", "svelte"]);
 const DATA_EXT = new Set(["csv", "tsv", "json", "yaml", "yml", "toml", "ini", "xml", "cfg", "conf"]);
@@ -94,13 +138,22 @@ const RUNNING_HEADER = /^(published\s+as|preprint|accepted\s+(?:at|to|for)|under
 function parsePdf(buf: Buffer, base: string): ParsedDoc {
   const pdf = extractPdfText(buf);
   if (pdf.encrypted) throw new UnreadableError("the PDF is encrypted");
+  // Pages with (almost) no text layer are scanned images: recognise them locally instead of losing them.
+  const scanned = pdf.pages.map((t, i) => (t.replace(/\s+/g, "").length < 20 ? i + 1 : 0)).filter((p) => p > 0);
+  let ocr = new Map<number, string[]>();
+  if (scanned.length) {
+    try { ocr = ocrPdfPages(buf, scanned); }
+    catch (e) { if (scanned.length === pdf.pages.length) throw new UnreadableError(`scanned PDF; offline OCR failed: ${e instanceof Error ? e.message : e}`); }
+    for (const [p, lines] of ocr) pdf.pages[p - 1] = lines.join("\n");
+  }
   const blocks: Block[] = [];
   let heading = "";
   let firstLines: string[] = [];
   pdf.pages.forEach((pageText, i) => {
     const page = i + 1;
     let para: string[] = [];
-    const flush = () => { if (para.length) { blocks.push({ text: joinLines(para), heading, page, lineStart: null, lineEnd: null, symbol: null }); para = []; } };
+    const viaOcr = ocr.has(page);
+    const flush = () => { if (para.length) { blocks.push({ text: joinLines(para), heading: viaOcr ? (heading ? `${heading} > ${OCR_MARK}` : OCR_MARK) : heading, page, lineStart: null, lineEnd: null, symbol: null }); para = []; } };
     for (const raw of pageText.split("\n")) {
       const line = raw.trim();
       if (page === 1 && firstLines.length < 4 && line.length > 8 && !RUNNING_HEADER.test(line)) firstLines.push(line);
@@ -114,7 +167,7 @@ function parsePdf(buf: Buffer, base: string): ParsedDoc {
     flush();
   });
   const title = pdf.title && !/^(untitled|microsoft word|document\d*)/i.test(pdf.title) ? pdf.title : (firstLines[0] && firstLines[0].length < 160 ? pdfTitle(firstLines) : base);
-  return { title, format: "pdf", blocks, pages: pdf.pages.length, redactions: 0 };
+  return { title, format: "pdf", blocks, pages: pdf.pages.length, redactions: 0, ...(ocr.size ? { ocrPages: [...ocr.keys()].sort((a, b) => a - b) } : {}) };
 }
 
 /** A title set in capitals (or ending on a joining word) often wraps onto a second line. */

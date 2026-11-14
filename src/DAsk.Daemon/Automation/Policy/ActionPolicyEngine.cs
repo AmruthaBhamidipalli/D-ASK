@@ -341,7 +341,8 @@ public class ActionPolicyEngine
         // Windows administration, the user's own Chrome (session authorisation and sensitive actions) and approved code edits. Never auto-allowed.
         if (normalizedType is DesktopActionTypes.ProcessEnd or DesktopActionTypes.ServiceControl or DesktopActionTypes.StartupToggle
             or DesktopActionTypes.RadioToggle or DesktopActionTypes.VolumeSet or DesktopActionTypes.BrightnessSet or DesktopActionTypes.PowerAction
-            or DesktopActionTypes.PowerCancel or DesktopActionTypes.ChromeAuthorize or DesktopActionTypes.ChromeSensitive or DesktopActionTypes.DevEditFile)
+            or DesktopActionTypes.PowerCancel or DesktopActionTypes.DisplayModeSet or DesktopActionTypes.DisplayModeKeep
+            or DesktopActionTypes.AndroidConnect or DesktopActionTypes.AndroidTransfer or DesktopActionTypes.AndroidCommand or DesktopActionTypes.ChromeAuthorize or DesktopActionTypes.ChromeSensitive or DesktopActionTypes.DevEditFile)
         {
             return (false, ActionRiskLevel.Elevated, "This change requires explicit user approval of the exact action.");
         }
@@ -1195,6 +1196,13 @@ public static class DesktopActionTypes
     public const string BrightnessSet = "System.SetBrightness";
     public const string PowerAction = "System.Power";
     public const string PowerCancel = "System.CancelPower";
+    /// <summary>Change the primary display's resolution (session only), then keep (save) or roll back (2026-11-15).</summary>
+    public const string DisplayModeSet = "System.SetDisplayMode";
+    public const string DisplayModeKeep = "System.KeepDisplayMode";
+    /// <summary>Android through adb (2026-11-15): connect over Wi-Fi, copy a file to/from the phone, one fixed device command.</summary>
+    public const string AndroidConnect = "Android.Connect";
+    public const string AndroidTransfer = "Android.Transfer";
+    public const string AndroidCommand = "Android.Command";
     // The user's own Chrome (2026-11-14): the session is authorised once; sensitive actions each separately.
     public const string ChromeAuthorize = "Chrome.AuthorizeSession";
     public const string ChromeSensitive = "Chrome.SensitiveAction";

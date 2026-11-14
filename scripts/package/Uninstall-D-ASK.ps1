@@ -13,6 +13,16 @@ if ($running) { throw "D-ASK is running from $Destination; close it first. Nothi
 foreach ($lnk in (Join-Path ([Environment]::GetFolderPath('Programs')) 'D-ASK.lnk'), (Join-Path ([Environment]::GetFolderPath('Startup')) 'D-ASK.lnk')) {
     if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "Removed $lnk" }
 }
+# The Chrome relay registration, only when it points into THIS install (a development registration is left alone).
+$nmKey = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.dask.chrome'
+if (Test-Path $nmKey) {
+    $nmJson = (Get-ItemProperty $nmKey).'(default)'
+    $nmHost = if ($nmJson -and (Test-Path $nmJson)) { (Get-Content $nmJson -Raw | ConvertFrom-Json).path } else { $null }
+    if ($nmHost -and $nmHost.StartsWith($Destination, [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item $nmKey -Force; Remove-Item $nmJson -Force
+        Write-Host 'Removed the D-ASK Chrome relay registration (remove the D-ASK extension in chrome://extensions yourself).'
+    }
+}
 Remove-Item -LiteralPath $Destination -Recurse -Force
 Write-Host "Removed $Destination"
 $data = Join-Path $env:LOCALAPPDATA 'D-ASK'

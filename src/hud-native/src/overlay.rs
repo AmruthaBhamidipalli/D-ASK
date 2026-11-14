@@ -221,6 +221,35 @@ pub struct OverlayController {
     /// arrives (or this deadline), so the HUD can never sit between the approved input and its target. Emergency Stop
     /// stays on its global hotkey, and any physical mouse or keyboard use stops the input in the daemon.
     input_passthrough_until: Mutex<Option<Instant>>,
+    /// 2026-11-15: the "OPEN CONSOLE" button the page shows in Ambient mode (client pixels). In Ambient it alone (besides an
+    /// approval) takes clicks, so the console is reachable without knowing the hotkey.
+    console_handle: Mutex<Option<Region>>,
+    /// When the HOST last saw the left button pressed over that button. The page's "OpenConsole" request is honoured only right
+    /// after such a press: a page script alone can never raise the interaction mode.
+    handle_pressed_at: Mutex<Option<Instant>>,
+}
+
+/// The console button must be a small control, not a full-screen trap.
+pub const MAX_HANDLE_CSS: (f64, f64) = (480.0, 120.0);
+/// How long after the host saw the press an "OpenConsole" request is honoured.
+pub const HANDLE_CLICK_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Validates the page's console-button rectangle (CSS px) and converts it to client pixels.
+pub fn console_handle_from_css(r: [f64; 4], scale: f64, client_w: f64, client_h: f64) -> Result<Region, String> {
+    if !(scale.is_finite() && scale > 0.0 && scale <= 8.0) {
+        return Err("invalid scale factor".into());
+    }
+    if r.iter().any(|v| !v.is_finite()) || r[2] < 1.0 || r[3] < 1.0 {
+        return Err("invalid console button rectangle".into());
+    }
+    if r[2] > MAX_HANDLE_CSS.0 || r[3] > MAX_HANDLE_CSS.1 {
+        return Err("the console button rectangle is too large".into());
+    }
+    let reg = Region { x: r[0] * scale, y: r[1] * scale, w: r[2] * scale, h: r[3] * scale };
+    if reg.x < 0.0 || reg.y < 0.0 || reg.x + reg.w > client_w + 1.0 || reg.y + reg.h > client_h + 1.0 {
+        return Err("the console button rectangle is outside the window".into());
+    }
+    Ok(reg)
 }
 
 fn hwnd_of(v: isize) -> HWND {
@@ -241,7 +270,30 @@ impl OverlayController {
             stop: AtomicBool::new(false),
             approval: Mutex::new(None),
             input_passthrough_until: Mutex::new(None),
+            console_handle: Mutex::new(None),
+            handle_pressed_at: Mutex::new(None),
         })
+    }
+
+    /// The page reports where its Ambient-mode "OPEN CONSOLE" button is (None: not shown).
+    pub fn set_console_handle(&self, rect: Option<[f64; 4]>, scale: f64) -> Result<(), String> {
+        let wr = self.window_rect();
+        let (cw, ch) = ((wr.right - wr.left) as f64, (wr.bottom - wr.top) as f64);
+        let region = match rect {
+            Some(r) => Some(console_handle_from_css(r, scale, cw, ch)?),
+            None => None,
+        };
+        *self.console_handle.lock().unwrap() = region;
+        Ok(())
+    }
+
+    /// True (once) when the host itself saw the left button pressed over the console button within HANDLE_CLICK_WINDOW.
+    pub fn take_console_handle_click(&self) -> bool {
+        let mut g = self.handle_pressed_at.lock().unwrap();
+        match g.take() {
+            Some(t) => t.elapsed() <= HANDLE_CLICK_WINDOW,
+            None => false,
+        }
     }
 
     /// P1/P2: an approved input action is about to run; take no input at all until it ends (bounded by `max`).
@@ -550,6 +602,23 @@ impl OverlayController {
         let interactive = self.mode() == InteractionMode::Interactive;
         if !interactive {
             if self.mode() == InteractionMode::Ambient {
+                // The console button: the only other place Ambient takes a click (never focus or keys).
+                let handle = *self.console_handle.lock().unwrap();
+                if let Some(h) = handle {
+                    let mut p = POINT::default();
+                    let over = unsafe { GetCursorPos(&mut p).is_ok() && ScreenToClient(self.hwnd(), &mut p).as_bool() } && h.contains(p.x as f64, p.y as f64);
+                    if over {
+                        let down = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 };
+                        if down {
+                            *self.handle_pressed_at.lock().unwrap() = Some(Instant::now());
+                        }
+                        let _guard = self.style_lock.lock().unwrap();
+                        if self.mode() == InteractionMode::Ambient {
+                            self.set_style_locked(WS_EX_NOACTIVATE.0, WS_EX_TRANSPARENT.0);
+                        }
+                        return;
+                    }
+                }
                 let has_approval = self.approval.lock().unwrap().is_some();
                 if !has_approval {
                     if self.ex_style() & WS_EX_TRANSPARENT.0 == 0 {
@@ -798,5 +867,26 @@ mod tests {
         assert!(mode_allowed(Hidden, true, false), "the toggle hotkey also brings a hidden HUD back");
         assert!(mode_allowed(Ambient, true, false));
         assert!(mode_allowed(Hidden, false, true));
+    }
+
+    #[test]
+    fn console_button_region_is_small_and_inside_the_window() {
+        let r = console_handle_from_css([100.0, 20.0, 120.0, 24.0], 1.25, 1920.0, 1080.0).unwrap();
+        assert_eq!(r, Region { x: 125.0, y: 25.0, w: 150.0, h: 30.0 });
+        assert!(console_handle_from_css([0.0, 0.0, 1920.0, 1080.0], 1.0, 1920.0, 1080.0).is_err(), "never a full-screen trap");
+        assert!(console_handle_from_css([1900.0, 10.0, 100.0, 20.0], 1.0, 1920.0, 1080.0).is_err(), "outside the window");
+        assert!(console_handle_from_css([f64::NAN, 0.0, 10.0, 10.0], 1.0, 1920.0, 1080.0).is_err());
+        assert!(console_handle_from_css([10.0, 10.0, 0.0, 10.0], 1.0, 1920.0, 1080.0).is_err());
+    }
+
+    #[test]
+    fn open_console_needs_a_press_the_host_saw() {
+        let c = OverlayController::new(HWND(std::ptr::null_mut()));
+        assert!(!c.take_console_handle_click(), "a page request alone never opens the console");
+        *c.handle_pressed_at.lock().unwrap() = Some(Instant::now());
+        assert!(c.take_console_handle_click(), "right after the host saw the press");
+        assert!(!c.take_console_handle_click(), "one press opens it once");
+        *c.handle_pressed_at.lock().unwrap() = Some(Instant::now() - HANDLE_CLICK_WINDOW - Duration::from_millis(10));
+        assert!(!c.take_console_handle_click(), "a stale press does not count");
     }
 }

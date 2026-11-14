@@ -127,7 +127,8 @@ export interface GroundingVerdict {
 export type ArgumentDomain =
   | {
       kind: "enum";
-      values: readonly string[];
+      /** Allowed values. Numbers and booleans (2026-11-14) are compared exactly (===), never coerced. */
+      values: readonly (string | number | boolean)[];
       optional: boolean;
       /** How a value is compared with the allowed ones: verbatim, ignoring whitespace, or as a folder path. */
       compare?: "exact" | "whitespace" | "path";

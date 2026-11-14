@@ -64,6 +64,11 @@ async function main() {
     const r = await run(d, new Scripted(plan([{ id: "s1", tool: "chrome.click", input: { text: "Buy now" } }])), 'Click "Buy now" in Chrome');
     check(r.outcome !== "completed" && /declined/i.test(r.response), "E3 a declined sensitive click is reported as not done", { o: r.outcome, r: r.response });
   }
+  {
+    const d = new FakeDaemon([{ status: "ok", result: { verified: true, page: { title: "t", url: "u", text: "x" } } } as any]);
+    await run(d, new Scripted(plan([{ id: "s1", tool: "chrome.read_page", input: { tabId: 99 } }])), "Read the page in Chrome");
+    check(d.calls.every((c) => !("tabId" in c.args)), "E4 a tab id the request did not give never reaches Chrome", d.calls);
+  }
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

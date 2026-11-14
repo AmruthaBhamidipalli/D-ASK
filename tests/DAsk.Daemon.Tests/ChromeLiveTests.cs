@@ -38,6 +38,10 @@ public class ChromeLiveTests
     private readonly ITestOutputHelper _out;
     public ChromeLiveTests(ITestOutputHelper o) => _out = o;
     private static string Root => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    /// <summary>DASK_CHROME_REAL_PROFILE=1: run against the user's normal Chrome profile (extension loaded there once by the user).</summary>
+    private static bool RealProfile => Environment.GetEnvironmentVariable("DASK_CHROME_REAL_PROFILE") == "1";
+    /// <summary>DASK_CHROME_HOST_EXE: test a packaged relay instead of the development build.</summary>
+    private static string? HostOverride => Environment.GetEnvironmentVariable("DASK_CHROME_HOST_EXE");
 
     private const string Page1 = """
         <!doctype html><html><head><title>D-ASK Test Page 1</title></head><body>
@@ -57,7 +61,7 @@ public class ChromeLiveTests
     [Trait("Category", "ChromeLive")]
     public async Task Live_UsersChrome_Navigate_Read_Click_Tabs_Fill_Sensitive_Security_Stop()
     {
-        string hostExe = Path.Combine(Root, "src", "DAsk.ChromeHost", "bin", "Release", "net8.0", "dask-chrome-host.exe");
+        string hostExe = HostOverride ?? Path.Combine(Root, "src", "DAsk.ChromeHost", "bin", "Release", "net8.0", "dask-chrome-host.exe");
         Assert.True(File.Exists(hostExe), "build src/DAsk.ChromeHost in Release first");
         string chromeExe = @"C:\Program Files\Google\Chrome\Application\chrome.exe";
         string db = Path.Combine(Path.GetTempPath(), $"dask-chrome-live-{Guid.NewGuid():N}.db");
@@ -95,7 +99,7 @@ public class ChromeLiveTests
                 {
                     ApprovalId = r.ApprovalId, ActionId = r.ActionId, ActionType = r.ActionType, ParametersSha256 = r.ParametersSha256,
                     ActionDigest = r.ActionDigest, Approved = decide(r.ActionType), DecisionSource = "UserExplicitConfirmation",
-                }, "live-session", () => false, () => 1);
+                }, r.SessionId, () => false, () => 1);   // the owning HUD session decides (two sessions are used below)
             });
             bool stopped = false, online = true;
             broker.Start();
@@ -126,13 +130,23 @@ public class ChromeLiveTests
             Assert.False(broker.Connected);
             Assert.Equal("not_connected", (await Do(ChromeService.ListTabs, new { })).Error?.Code);
 
-            // ── 1. launch the real Chrome (throwaway profile) with the extension; the extension connects through the native host ──
-            harness = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(Root, "scripts", "chrome", "test-chrome-with-extension.mjs")}\" \"{chromeExe}\"")
-                { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, WorkingDirectory = Root })!;
-            string? line = await harness.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(60));
-            _out.WriteLine("harness: " + line);
-            Assert.StartsWith("READY", line);
-            for (int i = 0; i < 100 && !broker.Connected; i++) await Task.Delay(200);
+            // ── 1. launch the real Chrome with the extension; the extension connects through the native host ──
+            // Default: a THROWAWAY profile (harness). DASK_CHROME_REAL_PROFILE=1: the user's normal profile, where the user loaded the extension
+            // once; Chrome is opened normally (no harness, no CDP), only local test pages are opened, and only the tabs this test opened are closed.
+            if (RealProfile)
+            {
+                using (Process.Start(new ProcessStartInfo(chromeExe) { UseShellExecute = false })) { }
+                _out.WriteLine("real profile: opened Chrome normally; waiting for the installed D-ASK extension");
+            }
+            else
+            {
+                harness = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(Root, "scripts", "chrome", "test-chrome-with-extension.mjs")}\" \"{chromeExe}\"")
+                    { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, WorkingDirectory = Root })!;
+                string? line = await harness.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                _out.WriteLine("harness: " + line);
+                Assert.StartsWith("READY", line);
+            }
+            for (int i = 0; i < 300 && !broker.Connected; i++) await Task.Delay(200);   // the extension retries every 30 s
             Assert.True(broker.Connected, "the extension must connect through the native host");
             _out.WriteLine($"connected: chrome pid {broker.ChromePid} ({broker.ChromePath})");
             Assert.Equal(chromeExe, broker.ChromePath, ignoreCase: true);
@@ -145,6 +159,16 @@ public class ChromeLiveTests
             decide = t => t != DesktopActionTypes.ChromeAuthorize;
             Assert.Equal("approval_denied", (await Do(ChromeService.ListTabs, new { })).Error?.Code);
             decide = _ => true;
+
+            // Everyday profile: close stale tabs a previous (failed) run of THIS test left: only its own local test pages.
+            if (RealProfile)
+            {
+                var stale = await Do(ChromeService.ListTabs, new { });
+                if (stale.Status == "ok")
+                    foreach (var t in Res(stale).GetProperty("tabs").EnumerateArray()
+                        .Where(t => System.Text.RegularExpressions.Regex.IsMatch(t.GetProperty("url").GetString() ?? "", @"^http://127\.0\.0\.1:1[89]\d{3}/page[12]$")))
+                        await Do(ChromeService.CloseTab, new { tabId = t.GetProperty("tabId").GetInt32() });
+            }
 
             // ── 2/3. navigate and read ──
             var open = await Do(ChromeService.OpenTab, new { url = $"http://127.0.0.1:{port}/page1" });
@@ -167,7 +191,13 @@ public class ChromeLiveTests
             int tab2 = Res(open2).GetProperty("tabId").GetInt32();
             var tabs = await Do(ChromeService.ListTabs, new { });
             Assert.True(Res(tabs).GetProperty("count").GetInt32() >= 2);
-            var sw = await Do(ChromeService.SwitchTab, new { title = "Page 2" });
+            // An authorized session belongs to the HUD session that approved it: another client's task must ask for its own authorization.
+            int auths = asked.Count(t => t == DesktopActionTypes.ChromeAuthorize);
+            var other = await svc.ExecuteAsync(ChromeService.ListTabs, JsonSerializer.SerializeToElement(new { }), new DesktopActionContext("other-task", "c9", "live-session-2"), CancellationToken.None);
+            Assert.Equal("ok", other.Status);
+            Assert.Equal(auths + 1, asked.Count(t => t == DesktopActionTypes.ChromeAuthorize));
+            var sw = await Do(ChromeService.SwitchTab, new { title = "Page 2" });   // the first session must authorize again too
+            Assert.Equal(auths + 2, asked.Count(t => t == DesktopActionTypes.ChromeAuthorize));
             Assert.Equal("ok", sw.Status);
             Assert.Equal(tab1, Res(sw).GetProperty("tabId").GetInt32());
 
@@ -210,14 +240,54 @@ public class ChromeLiveTests
             Assert.False(afterStop.Ok); Assert.StartsWith("not_authorized", afterStop.Error);
             stopped = false;
 
-            // ── 12. cleanup: re-authorize once more, then revoke explicitly; closing Chrome disconnects the bridge ──
+            // ── 12. reauthorization after Emergency Stop: a new approval is asked, then actions work again ──
+            int before = asked.Count(t => t == DesktopActionTypes.ChromeAuthorize);
             Assert.Equal("ok", (await Do(ChromeService.ListTabs, new { })).Status);
+            Assert.Equal(before + 1, asked.Count(t => t == DesktopActionTypes.ChromeAuthorize));
+
+            // ── 13. recovery: the relay process dies -> the bridge disconnects, the session ends; the extension reconnects by itself and a
+            //        new session must be authorized again ──
+            foreach (var h in Process.GetProcessesByName("dask-chrome-host")) { try { h.Kill(); } catch { } }
+            for (int i = 0; i < 50 && broker.Connected; i++) await Task.Delay(100);
+            Assert.False(broker.Connected);
+            Assert.False(svc.SessionActive);
+            for (int i = 0; i < 300 && !broker.Connected; i++) await Task.Delay(200);
+            Assert.True(broker.Connected, "the extension must reconnect after the relay died");
+            Assert.Equal("ok", (await Do(ChromeService.ListTabs, new { })).Status);
+            Assert.Equal(before + 2, asked.Count(t => t == DesktopActionTypes.ChromeAuthorize));
+
+            // ── 13b. everyday profile only, online: a REAL site. Read it, extract its text, follow its harmless link, close only that tab. ──
+            if (RealProfile && System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+            {
+                var site = await Do(ChromeService.OpenTab, new { url = "https://example.com/" });
+                Assert.Equal("ok", site.Status);
+                int siteTab = Res(site).GetProperty("tabId").GetInt32();
+                var page = await Do(ChromeService.ReadPage, new { tabId = siteTab });
+                Assert.Equal("ok", page.Status);
+                string text = Res(page).GetProperty("page").GetProperty("text").GetString() ?? "";
+                _out.WriteLine("example.com text: " + text.Replace("\n", " / "));
+                Assert.Contains("Example Domain", Res(page).GetProperty("page").GetProperty("title").GetString());
+                Assert.Contains("documentation examples", text);
+                var links = Res(page).GetProperty("page").GetProperty("links").EnumerateArray().ToList();
+                Assert.NotEmpty(links);
+                string linkText = links[0].GetProperty("text").GetString()!;
+                var follow = await Do(ChromeService.Click, new { tabId = siteTab, text = linkText });
+                Assert.Equal("ok", follow.Status);
+                Assert.NotEqual("https://example.com/", Res(follow).GetProperty("urlAfter").GetString());
+                Assert.Equal("ok", (await Do(ChromeService.CloseTab, new { tabId = siteTab })).Status);
+            }
+
+            // ── 14. cleanup: close exactly the tabs this test opened, revoke explicitly; in throwaway mode closing Chrome disconnects the bridge ──
+            foreach (var t in new[] { tab1, tab2 }) Assert.Equal("ok", (await Do(ChromeService.CloseTab, new { tabId = t })).Status);
             var rev = await Do(ChromeService.Revoke, new { });
             Assert.True(Res(rev).GetProperty("extensionConfirmed").GetBoolean());
             Assert.False(svc.SessionActive);
-            harness.StandardInput.Close();
-            for (int i = 0; i < 50 && broker.Connected; i++) await Task.Delay(200);
-            Assert.False(broker.Connected);
+            if (!RealProfile)
+            {
+                harness!.StandardInput.Close();
+                for (int i = 0; i < 50 && broker.Connected; i++) await Task.Delay(200);
+                Assert.False(broker.Connected);
+            }
             _out.WriteLine("approvals asked: " + string.Join(",", asked));
             Assert.True((await recorder.VerifyAuditChainAsync()).Ok);
         }

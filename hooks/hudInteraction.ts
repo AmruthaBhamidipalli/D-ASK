@@ -80,6 +80,11 @@ export function requestMode(mode: "ambient" | "hidden"): void {
   if (isNativeHud()) postToHud({ type: "SetInteraction", payload: { mode } });
 }
 
+/** The user clicked the Ambient-mode "OPEN CONSOLE" button; the host verifies the click itself before opening the console. */
+export function requestOpenConsole(): void {
+  if (isNativeHud()) postToHud({ type: "OpenConsole" });
+}
+
 /** Keeps the floating panels clear of each other: the agent panel sits between the console and the controls. */
 function publishLayout(): void {
   const root = document.documentElement;
@@ -147,12 +152,27 @@ export function useHudInteraction(): HudInteraction {
       last = json;
       postToHud({ type: "HitRegions", payload: { rects, viewport } });
     };
-    const schedule = () => { if (pending === null) pending = window.setTimeout(report, 50); };
+    // 2026-11-15: the Ambient-mode "OPEN CONSOLE" button. Its rectangle is the only extra place Ambient takes a click; the host
+    // switches to Interactive only when it saw the press there itself (the page alone can never raise the mode).
+    let lastHandle = "";
+    const reportHandle = () => {
+      if (!isNativeHud()) return;
+      const el = document.querySelector(".console-open-btn");
+      const b = el ? visibleBox(el) : null;
+      const rect = b ? [Math.floor(b.left), Math.floor(b.top), Math.ceil(b.width), Math.ceil(b.height)] : null;
+      const json = JSON.stringify(rect);
+      if (json === lastHandle) return;
+      lastHandle = json;
+      postToHud({ type: "ConsoleHandle", payload: { rect } });
+    };
+    const reportAll = report;
+    const reportBoth = () => { reportAll(); reportHandle(); };
+    const schedule = () => { if (pending === null) pending = window.setTimeout(reportBoth, 50); };
     const observer = new MutationObserver(schedule);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     window.addEventListener("resize", schedule);
-    const timer = window.setInterval(report, 500);
-    report();
+    const timer = window.setInterval(reportBoth, 500);
+    reportBoth();
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", schedule);

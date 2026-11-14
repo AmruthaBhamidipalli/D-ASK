@@ -39,10 +39,12 @@ nothing else
 
 /** Content words of the objective, with arithmetic expressions and slash-paths removed. */
 export function contentWords(objective: string): string[] {
+  // Folder paths go FIRST, as whole tokens (2026-11-14): stripping numbers first split a path with a digit in a folder name
+  // (".../dask-organize-EnD6Q9/...") into stray "words" such as "q" that no tool explains, so ~18% of verified copies were "unverified".
   const stripped = objective
+    .replace(/(?:\.{0,2}[\\/])?[\w.-]+(?:[\\/][\w.-]+)+[\\/]?/g, " ")       // folder paths
     .replace(/[\d.]+(?:\s*[-+*/%^×÷x]\s*[\d.(][\d.\s+\-*/%^()×÷x]*)?/g, " ") // numbers and expressions
     .replace(/[()]/g, " ")
-    .replace(/(?:\.{0,2}[\\/])?[\w.-]+(?:[\\/][\w.-]+)+[\\/]?/g, " ")       // folder paths
     .toLowerCase()
     .replace(/[’']/g, "'");
   return (stripped.match(/[a-z][a-z']*/g) ?? [])
@@ -224,7 +226,11 @@ export function checkArguments(domains: ArgumentDomains, tool: string, input: Re
     const canon = (s: string) => dom.compare === "whitespace" ? s.replace(/\s+/g, "")
       : dom.compare === "path" ? (s.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase() || ".")
       : s;
-    if (typeof v !== "string" || !dom.values.some((a) => canon(a) === canon(v))) {
+    // A number or boolean must equal an allowed number/boolean exactly (2026-11-14: a pid, percentage, delay, amount or switch the
+    // request states); text is compared as before. A value of another type than every allowed one never passes.
+    const okValue = typeof v === "string" ? dom.values.some((a) => typeof a === "string" && canon(a) === canon(v))
+      : (typeof v === "number" || typeof v === "boolean") && dom.values.some((a) => a === v);
+    if (!okValue) {
       return `${tool}.${prop} = ${JSON.stringify(v)} is not taken from the request; allowed: ${dom.values.map((x) => JSON.stringify(x)).join(", ")}`;
     }
   }

@@ -97,6 +97,12 @@ public class AgentHostOptions
     public string ChromeExtensionId { get; set; } = "lkiheaganheamabgecpnafiefeiadlpi";
     /// <summary>The broker pipe the native-messaging host connects to; default derived from the user SID.</summary>
     public string? ChromeBrokerPipe { get; set; }
+    /// <summary>Android devices through adb (discovery, info, approved transfers and commands). Off by default.</summary>
+    public bool Android { get; set; } = false;
+    /// <summary>adb.exe; default: ANDROID_HOME, %LOCALAPPDATA%\Android\Sdk\platform-tools, then PATH.</summary>
+    public string? AdbPath { get; set; }
+    /// <summary>Local folders files may be pushed from / pulled into. Empty: Documents\D-ASK.</summary>
+    public string[] AndroidFileRoots { get; set; } = Array.Empty<string>();
     /// <summary>Folders inside which D-ASK may apply approved code edits (dev.edit_file). Empty: off.</summary>
     public string[] DevEditRoots { get; set; } = Array.Empty<string>();
     /// <summary>Folders whose projects D-ASK may build or test (dev.run_task), each run after approval. Empty (default): off.</summary>

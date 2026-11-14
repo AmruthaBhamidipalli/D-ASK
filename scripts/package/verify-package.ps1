@@ -120,6 +120,26 @@ Record 'packaged memory: "Forget ..." COMPLETED and the text is gone from the da
 $realNow = if (Test-Path $realDb) { (Get-FileHash $realDb -Algorithm SHA256).Hash } else { $null }
 Record 'the user''s real memory.db was not touched' ($realNow -eq $realDbHash) @{ before = $realDbHash; after = $realNow }
 
+# 1d. 2026-11-14 subsystems INSIDE the package (read-only requests: no approval card is needed, nothing is changed)
+$relay = "$PackageRoot\src\DAsk.ChromeHost\bin\Release\net8.0\dask-chrome-host.exe"
+$pm = Get-Content "$PackageRoot\package-manifest.json" -Raw | ConvertFrom-Json
+Record 'the Chrome relay and the extension are packaged and covered by the integrity manifest' ((Test-Path $relay) -and (Test-Path "$PackageRoot\extensions\dask-chrome\manifest.json") -and (@($pm.files | Where-Object { $_.path -eq 'src/DAsk.ChromeHost/bin/Release/net8.0/dask-chrome-host.exe' }).Count -eq 1) -and (@($pm.files | Where-Object { $_.path -like 'extensions/dask-chrome/*' }).Count -ge 4)) @{ relay = (Test-Path $relay) }
+Start-ViaLauncher
+$brokerPipe = @([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -match 'dask-chrome-broker-' })
+Record 'packaged daemon: the Chrome broker listens on a named pipe (no TCP port)' ($brokerPipe.Count -ge 1) @{ pipes = $brokerPipe.Count }
+$d1 = Task "What's the volume?"
+$d1txt = Get-HudText $hwnd
+Record 'packaged Windows administration: "What''s the volume?" COMPLETED with the real volume' (($d1.Outcome -eq 'COMPLETED') -and ($d1txt -match 'Volume \d+%')) @{ outcome = $d1.Outcome }
+$d2 = Task 'Show running processes'
+Record 'packaged Windows administration: the running processes are listed' (($d2.Outcome -eq 'COMPLETED') -and ((Get-HudText $hwnd) -match 'running process')) @{ outcome = $d2.Outcome }
+$d3 = Task 'Is my Chrome connected?'
+Record 'packaged Chrome bridge: status answered honestly (no extension loaded in this test -> not connected)' (($d3.Outcome -eq 'COMPLETED') -and ((Get-HudText $hwnd) -match 'not connected')) @{ outcome = $d3.Outcome }
+Save-HudShot $hwnd "$OutDir\new-subsystems.png"
+$daemonPid = $script:daemon.ProcessId
+$listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $daemonPid })
+Record 'packaged daemon: no listening TCP socket' ($listen.Count -eq 0) @{ listening = @($listen | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) }
+Stop-All
+
 # 1c. Local knowledge (RAG) and Research Mode INSIDE the package: the packaged llama-server serves the packaged bge-small model (hash-pinned in the
 # manifest-covered host code). Isolated index / research folder / indexable folder in the evidence folder via AgentHost:ExtraEnvironment (applied after the
 # launcher profile, so the user's Documents are never indexed or written). Skipped (recorded as failed) when -Papers is not given.
@@ -185,5 +205,8 @@ Check-Tamper 'a changed better-sqlite3 binary' { $fs = [IO.File]::Open($sqliteNo
 Check-Tamper 'an edited manifest' { Add-Content -Path $manifest -Value ' ' } { Copy-Item $manifestBackup $manifest -Force } 'expected hash' 'What is 8+9?' 'What is 18+19?'
 
 Remove-Item Env:\DASK_AgentHost__Memory, Env:\DASK_AgentHost__ExtraEnvironment__DASK_MEMORY_DB -ErrorAction SilentlyContinue
+# Authenticode status (2026-11-15): reported, not a pass/fail check — a package is only "signed" when Sign-D-ASK.ps1 -Mode Verify passes
+# with a publicly trusted certificate. Integrity is enforced separately by the manifest checks above.
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\Sign-D-ASK.ps1" -PackageRoot $PackageRoot -Mode Inventory -ReportPath "$OutDir\signing-inventory.json" | Out-Host
 $results | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "$OutDir\verify-package.json"
 "`n$(@($results | Where-Object pass).Count) of $($results.Count) passed"

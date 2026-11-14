@@ -9,7 +9,7 @@
 import path from "node:path";
 import { AgentRuntime } from "../../agent/runtime/runtime";
 import { createDefaultRegistry, DEFAULT_GRANTS } from "../../agent/runtime";
-import { argumentDomainsFor, checkArguments, detectFacets, groundCall } from "../../agent/runtime/grounding";
+import { argumentDomainsFor, checkArguments, contentWords, detectFacets, groundCall } from "../../agent/runtime/grounding";
 import { Brain } from "../../agent/runtime/brain";
 import { Planner } from "../../agent/runtime/planner";
 import { buildPlanSchema } from "../../agent/runtime/inference/schemas";
@@ -224,6 +224,13 @@ async function main(): Promise<void> {
     const extra = await run(new Scripted([plan([{ id: "s1", tool: "system.time", input: {} }])], [SAT]), "What time is it and remind me to call mum");
     check(extra.outcome === "unverified" && extra.verification!.unexplained.includes("remind"), "W4 a request with an extra, unsupported clause → unverified", { outcome: extra.outcome, u: extra.verification?.unexplained });
   }
+
+  // 2026-11-14 regression: a digit inside a folder name must not split the path into stray "words" (it made ~18% of verified copies "unverified").
+  for (const dir of ["dask-organize-EnD6Q9", "dask-organize-0Di7fK", "Projects2024", "v1.2-final"]) {
+    const w = contentWords(`Copy "C:\\Users\\me\\${dir}\\Downloads\\notes.txt" to "C:\\Users\\me\\${dir}\\Archive"`);
+    check(w.every((x) => x === "copy" || x === "c"), `W5 a path with digits in a folder name leaves no fragments of it (${dir})`, w);
+  }
+  check(JSON.stringify(contentWords("What is 17 plus 25?")) === JSON.stringify(["plus"]), "W6 numbers outside paths are still removed", contentWords("What is 17 plus 25?"));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

@@ -9,8 +9,12 @@ const WASM_CDN =
   typeof window !== "undefined"
     ? `${window.location.origin}/mediapipe/wasm`
     : "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
+// Offline-first (2026-11-14): the hand model ships with D-ASK (public/mediapipe/hand_landmarker.task, Apache-2.0,
+// SHA-256 fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1). Before this, gestures silently needed the internet.
 const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+  typeof window !== "undefined"
+    ? `${window.location.origin}/mediapipe/hand_landmarker.task`
+    : "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
 const WRIST = 0;
 const THUMB_TIP = 4;

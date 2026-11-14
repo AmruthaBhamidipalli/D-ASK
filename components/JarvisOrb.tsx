@@ -23,7 +23,7 @@ import { AgentStatusPanel } from "@/components/AgentStatusPanel";
 import { useTask } from "@/hooks/useTask";
 import { isNativeHud } from "@/hooks/nativeAgent";
 import { ManagePanel } from "@/components/ManagePanel";
-import { requestMode, useHudInteraction } from "@/hooks/hudInteraction";
+import { requestMode, requestOpenConsole, useHudInteraction } from "@/hooks/hudInteraction";
 import type { DeviceInfo } from "@/app/api/devices/route";
 
 type CameraState = "off" | "starting" | "on" | "error";
@@ -1067,7 +1067,8 @@ export default function JarvisOrb() {
   // Keyboard controls
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
+      // Never while typing: inputs, text areas and editable content keep their keys (2026-11-15: text areas were not excluded).
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
       switch (e.key) {
         case "+":
         case "=":
@@ -1185,8 +1186,8 @@ export default function JarvisOrb() {
             ) : (
               <span className="hud-mode-label">
                 {hud.toggleAvailable
-                  ? `AMBIENT · ${hud.toggleHotkey.toUpperCase()} TO INTERACT`
-                  : `AMBIENT · ${hud.toggleHotkey.toUpperCase()} IS IN USE BY ANOTHER PROGRAM — RESTART D-ASK TO INTERACT`}
+                  ? `AMBIENT · CLICK OPEN CONSOLE OR PRESS ${hud.toggleHotkey.toUpperCase()}`
+                  : `AMBIENT · CLICK OPEN CONSOLE (${hud.toggleHotkey.toUpperCase()} IS IN USE BY ANOTHER PROGRAM)`}
               </span>
             )}
           </div>
@@ -1272,6 +1273,10 @@ export default function JarvisOrb() {
       <section className="hud command-console" aria-label="Ultron command console" data-hud-interactive>
         <div className="console-header">
           <span>D-ASK // CORE CONSOLE</span>
+          {/* 2026-11-15: in Ambient mode (click-through) this is the one clickable way to open the console; the host verifies the click. */}
+          <button type="button" className="console-open-btn" aria-label="Open console" onClick={() => requestOpenConsole()} title={`Open the console (or press ${hud.toggleHotkey})`}>
+            OPEN CONSOLE ▸
+          </button>
           <div className="console-statuses">
             {aiThinking && <span className="ai-state">THINKING</span>}
             <span className="voice-state" data-state={voiceState}>

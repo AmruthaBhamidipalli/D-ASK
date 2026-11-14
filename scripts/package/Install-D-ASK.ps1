@@ -1,12 +1,13 @@
 # Per-user install of a built D-ASK package (no administrator rights, nothing outside the user's profile).
-#   powershell -ExecutionPolicy Bypass -File Install-D-ASK.ps1 [-Destination <folder>] [-NoShortcut] [-Autostart]
+#   powershell -ExecutionPolicy Bypass -File Install-D-ASK.ps1 [-Destination <folder>] [-NoShortcut] [-Autostart] [-NoChrome]
 # Run it from the package folder. It copies the package, verifies every file against package-manifest.json and the
 # manifest's hash pinned in the daemon's appsettings.json (the same check the daemon makes before starting the agent
 # host), creates a Start Menu shortcut, and optionally starts D-ASK at sign-in. It refuses to overwrite a running install.
 param(
     [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Programs\D-ASK'),
     [switch]$NoShortcut,
-    [switch]$Autostart
+    [switch]$Autostart,
+    [switch]$NoChrome
 )
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
@@ -47,5 +48,10 @@ if ($Autostart) {
     $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'D-ASK.lnk'
     $s = $shell.CreateShortcut($lnk); $s.TargetPath = $launcher; $s.WorkingDirectory = $Destination; $s.WindowStyle = 7; $s.Save()
     Write-Host "Starts at sign-in: $lnk"
+}
+# The Chrome relay: registered for THIS user only (HKCU); Chrome starts it only for the D-ASK extension. Inert until the extension is loaded.
+if (-not $NoChrome) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Destination 'scripts\chrome\register-native-host.ps1') | Write-Host
+    Write-Host "To let D-ASK use your Chrome: chrome://extensions > Developer mode > Load unpacked > $(Join-Path $Destination 'extensions\dask-chrome')"
 }
 Write-Host 'Done. Start D-ASK from the Start Menu (or run Start-D-ASK.cmd). Your data stays in %LOCALAPPDATA%\D-ASK.'

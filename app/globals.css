@@ -1218,3 +1218,20 @@ body[data-hud-mode="interactive"] .command-console {
 .manage-empty, .manage-foot { margin: 0; color: rgba(255, 255, 255, 0.55); }
 .manage-foot { padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
 body[data-hud-mode="ambient"] .manage-panel { display: none; }
+
+/* 2026-11-15: the console button. Only shown in Ambient (click-through) mode, where it is the clickable way to open the console. */
+.console-open-btn {
+  display: none;
+  margin-left: 8px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--hud-color);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--hud-color);
+  border-radius: 3px;
+  cursor: pointer;
+}
+body[data-hud-mode="ambient"] .console-open-btn { display: inline-block; }
+body[data-hud-mode="ambient"] .console-open-btn:hover { background: var(--hud-color); color: #000; }

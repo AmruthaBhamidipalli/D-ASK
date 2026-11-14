@@ -68,12 +68,16 @@ const DESKTOP_TOOL = /^desktop\.[a-z_]{1,40}$/;
 const OTHER_OFFERED_TOOLS: ReadonlySet<string> = new Set(["browser.request_action", "files.organize", "files.undo_organize", "files.copy", "files.rename", "files.undo_copy_rename", "notes.create",
   "workflows.save", "workflows.list", "workflows.get", "workflows.delete", "workflows.schedule", "workflows.unschedule",
   "plugins.list", "plugins.approve", "plugins.revoke", "plugins.grant", "plugins.revoke_permission", "plugins.disable", "plugins.enable", "dev.run_task", "dev.edit_file",
+  // Found by the packaged product profile (2026-11-14): these daemon tools were missing, so the host refused to start with file organisation on.
+  "files.move", "office.create_word_document", "office.create_excel_workbook",
   // Windows administration and the user's Chrome (2026-11-14): exact names only.
   "system.list_processes", "system.process_info", "system.end_process", "system.list_services", "system.service_info", "system.service_control",
-  "system.network_status", "system.set_radio", "system.audio_status", "system.set_volume", "system.display_status", "system.set_brightness",
+  "system.network_status", "system.set_radio", "system.audio_status", "system.set_volume", "system.display_status", "system.set_brightness", "system.set_display_mode",
   "system.startup_apps", "system.startup_toggle", "system.power", "system.cancel_power",
   "chrome.status", "chrome.authorize", "chrome.revoke", "chrome.open", "chrome.list_tabs", "chrome.open_tab", "chrome.navigate", "chrome.switch_tab",
-  "chrome.close_tab", "chrome.read_page", "chrome.click", "chrome.fill", "chrome.search"]);
+  "chrome.close_tab", "chrome.read_page", "chrome.click", "chrome.fill", "chrome.search",
+  // Android through adb (2026-11-15).
+  "android.list_devices", "android.device_info", "android.connect", "android.push", "android.pull", "android.command"]);
 // desktop.read_text matches DESKTOP_TOOL (desktop.*) already.
 // The full product profile offers every capability at once (about 35 names after copy/rename were added; found when the host refused to start in
 // the real HUD with everything enabled). Names stay exact (allowlist above); only the count bound grows.

@@ -20,7 +20,8 @@ public sealed class ClipboardOptions
 {
     /// <summary>AgentHost:Clipboard. Off by default.</summary>
     public bool Enabled { get; init; } = false;
-    public int MaxWriteLength { get; init; } = 4000;
+    /// <summary>The written text is shown in full on the approval card, whose parameters are limited to 2000 characters.</summary>
+    public int MaxWriteLength { get; init; } = 1900;
     public int MaxReadLength { get; init; } = 4000;
 }
 

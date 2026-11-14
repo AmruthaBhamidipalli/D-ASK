@@ -10,7 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
-import { promises as fsp } from "node:fs";
+import fs, { promises as fsp } from "node:fs";
 import path from "node:path";
 import { resolveRoots, relativeInside, type FileRoot } from "../tools/fileAccess";
 import type { Artifact, ArtifactSource, LanguageModel, Plan, RunOutcome, RunReport, RuntimeEvent, StepState, VerificationReport } from "../types";
@@ -22,6 +22,9 @@ import { parseWebPage } from "./extract";
 import { defaultResearchDir, findProject, listProjects, REPORT_TITLES, runResearch, type ReportType } from "./research";
 import { citation, retrieve, type Passage } from "./retrieve";
 import type { Collection, CollectionKind, KnowledgeStore } from "./store";
+import { searchScholarly, paperDocument, type HttpGet, type Paper } from "./scholar";
+import { keysFor, proposalLatex, reportToLatex, type BibSource } from "./export";
+import { analyse, analysisReport, type Analysis } from "./dataset";
 
 // ── Request grammar ─────────────────────────────────────────────────────────
 
@@ -40,7 +43,11 @@ export type KnowledgeIntent =
   | { op: "index-page"; urls: string[]; collection: string }
   | { op: "research-list" }
   | { op: "research-show"; name: string }
-  | { op: "research-resume"; name: string };
+  | { op: "research-resume"; name: string }
+  // 2026-11-15: optional online paper discovery, exports (BibTeX / LaTeX / proposal), offline dataset analysis.
+  | { op: "scholar"; query: string }
+  | { op: "export"; name: string; format: "latex" | "bibtex" | "proposal" }
+  | { op: "dataset"; path: string };
 
 const P = String.raw`^\s*(?:please\s+)?(?:(?:hey\s+)?d-?ask,?\s+)?`;
 const END = String.raw`\s*[.!?]?\s*$`;
@@ -121,6 +128,8 @@ export function parseKnowledgeRequest(objective: string, known: readonly string[
   // Note and memory requests belong to their own grammars, whatever their quoted content says (a saved answer may mention "literature review").
   if (/^\s*(?:please\s+)?(?:create|make|write|add|take|save|start)\s+(?:me\s+)?(?:a\s+|an\s+|one\s+)?(?:new\s+)?(?:text\s+)?note\b/i.test(o) || /^\s*(?:please\s+)?remember\s+that\b/i.test(o)) return null;
   if (!o || o.length > 600) return null;
+  const extra = parseResearchExtras(o);
+  if (extra) return extra;
   let m: RegExpExecArray | null;
   if (RE.indexCode.test(o)) return { op: "index", folder: null, collection: "codebase", kind: "code" };
   if ((m = RE.indexPage.exec(o))) {
@@ -193,6 +202,27 @@ export interface KnowledgeServiceOptions {
    * indexed and research uses local documents only. Only pages the user names are read; nothing is searched for.
    */
   fetchPage?: (url: string, signal: AbortSignal) => Promise<{ finalUrl: string; title: string; text: string; status: number; truncated: boolean }>;
+  /** OPTIONAL online scholarly discovery (arXiv + Crossref only; DASK_RESEARCH_ONLINE=1). Absent: refused, everything else works offline. */
+  scholarGet?: HttpGet;
+}
+
+// 2026-11-15 grammar: find papers ONLINE, export a research project, analyse a dataset.
+const SCHOLAR_RE = /^\s*(?:please\s+)?(?:find|search(?:\s+for)?|look\s+up|discover|get)\s+(?:(?:academic|scholarly|scientific|research|recent|new)\s+)*(?:papers|publications|articles|literature)\s+(?:on|about|for|regarding)\s+(.{3,200}?)\s+(?:online|on\s+arxiv(?:\s+and\s+crossref)?|on\s+the\s+(?:web|internet))\s*[.!?]?\s*$|^\s*(?:please\s+)?search\s+arxiv\s+(?:and\s+crossref\s+)?for\s+(.{3,200}?)\s*[.!?]?\s*$/i;
+const EXPORT_RE = /^\s*(?:please\s+)?(?:export|convert|save)\s+(?:the\s+)?(?:research\s+(?:project|report)\s+)?["“]?(.{2,120}?)["”]?\s+(?:as|to|in)\s+(latex|tex|bibtex|bib)\s*[.!?]?\s*$|^\s*(?:please\s+)?(?:export|generate|create|make)\s+(?:the\s+)?(?:bibliography|references|bibtex)\s+(?:for|of|from)\s+(?:the\s+)?(?:research\s+(?:project|report)\s+)?["“]?(.{2,120}?)["”]?\s*[.!?]?\s*$|^\s*(?:please\s+)?(?:write|create|generate|draft|make)\s+(?:a\s+)?(?:latex\s+)?(?:research\s+)?proposal\s+(?:from|for|based\s+on)\s+(?:the\s+)?(?:research\s+(?:project|report)\s+)?["“]?(.{2,120}?)["”]?(?:\s+(?:as|in)\s+latex)?\s*[.!?]?\s*$/i;
+const DATASET_RE = /^\s*(?:please\s+)?(?:analy[sz]e|run\s+(?:statistics|stats|an?\s+analysis)\s+on|summari[sz]e\s+the\s+data\s+in|evaluate\s+the\s+experiment\s+in)\s+(?:the\s+)?(?:dataset|data(?:\s+file)?|csv|file|experiment\s+results?)?\s*["“]?([A-Za-z]:\\[^"”\r\n]{1,240}?\.(?:csv|tsv|txt))["”]?\s*[.!?]?\s*$/i;
+
+export function parseResearchExtras(o: string): KnowledgeIntent | null {
+  let m = SCHOLAR_RE.exec(o);
+  if (m) return { op: "scholar", query: (m[1] ?? m[2])!.trim() };
+  m = EXPORT_RE.exec(o);
+  if (m) {
+    if (m[1]) return { op: "export", name: m[1].trim(), format: /bib/i.test(m[2]!) ? "bibtex" : "latex" };
+    if (m[3]) return { op: "export", name: m[3].trim(), format: "bibtex" };
+    return { op: "export", name: m[4]!.trim(), format: "proposal" };
+  }
+  m = DATASET_RE.exec(o);
+  if (m) return { op: "dataset", path: m[1]!.trim() };
+  return null;
 }
 
 export interface KnowledgeRunInput { taskId: string; objective: string; signal?: AbortSignal; emit?: (e: RuntimeEvent) => void }
@@ -338,6 +368,9 @@ export class KnowledgeService {
           { kind: "answer", text: atext, sources: cited.map(sourceOf), provenance: { ...this.#prov("knowledge.answer", run, cited.some(isWeb), null), grounding: g.status, question: intent.question } });
       }
       case "research": return this.#research(intent, run);
+      case "scholar": return this.#scholar(intent.query, run);
+      case "export": return this.#export(intent.name, intent.format, run);
+      case "dataset": return this.#dataset(intent.path, run);
       case "research-list": {
         const s = run.step("kb-research-list", "research.list", "List research projects");
         const ps = listProjects(this.o.researchDir);
@@ -424,6 +457,110 @@ export class KnowledgeService {
 
   #prov(tool: string, run: Run, online: boolean, verified: boolean | null) {
     return { tool, objective: run.objective, outcome: "completed" as RunOutcome, verified, online, at: new Date().toISOString() };
+  }
+
+  #library(): Paper[] {
+    try { return JSON.parse(fs.readFileSync(path.join(this.o.researchDir ?? defaultResearchDir(), "scholar-library.json"), "utf8")) as Paper[]; } catch { return []; }
+  }
+
+  /** OPTIONAL online discovery: arXiv + Crossref metadata and abstracts, saved to the library and indexed into the "scholar" collection. */
+  async #scholar(query: string, run: Run): Promise<RunReport> {
+    const s = run.step("kb-scholar", "research.scholar_search", `Find papers on "${query}" online (arXiv, Crossref)`);
+    if (!this.o.scholarGet) {
+      s.fail("online discovery is off");
+      return run.finish("refused", "Online paper search is switched off in this installation (offline-first; set DASK_RESEARCH_ONLINE=1 to allow arXiv and Crossref). Research over your local documents works offline: index a folder of papers and ask for a literature review.", null);
+    }
+    const r = await searchScholarly(query, this.o.scholarGet, run.signal, 10);
+    if (!r.papers.length) {
+      s.fail(r.notes.join(" ") || "no results");
+      return run.finish("failed", `No papers were found online for "${query}". ${r.notes.join(" ")}${r.notes.length ? " Are you online? Local research still works offline." : ""}`, null);
+    }
+    // Library (deduplicated by key) + one document per paper in the "scholar" collection, cited by its DOI/arXiv URL.
+    const dir = this.o.researchDir ?? defaultResearchDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const lib = this.#library();
+    for (const p of r.papers) if (!lib.some((x) => x.url === p.url)) lib.push(p);
+    fs.writeFileSync(path.join(dir, "scholar-library.json"), JSON.stringify(lib, null, 2), "utf8");
+    const store = this.o.store;
+    store.upsertCollection(store.collection("scholar")?.name ?? "scholar", "web", []);
+    if (this.o.embedder) store.bindEmbeddingModel(this.o.embedder.modelId);
+    for (const p of r.papers) {
+      const text = paperDocument(p);
+      const doc = parseWebPage(p.title, text);
+      const id = docIdOf("scholar", p.url);
+      const chunks = chunkDocument(id, doc);
+      let vectors: (Float32Array | null)[] | null = null;
+      if (this.o.embedder) { try { vectors = await this.o.embedder.embed(chunks.map((c) => `${doc.title}\n${c.text}`), "document", run.signal); } catch (e) { if (run.signal.aborted) throw e; } }
+      store.replaceDocument({ id, collection: "scholar", path: p.url, title: p.title.slice(0, 300), format: "html", size: text.length, mtimeMs: Date.now(),
+        sha256: createHash("sha256").update(text).digest("hex"), pages: null, status: vectors ? "indexed" : "keyword-only", error: null }, chunks, vectors);
+    }
+    store.touchCollection("scholar");
+    s.ok(`${r.papers.length} paper(s)`);
+    const list = r.papers.map((p) => `• ${p.title} — ${p.authors.slice(0, 3).join(", ")}${p.authors.length > 3 ? " et al." : ""}${p.year ? ` (${p.year})` : ""}${p.venue ? `, ${p.venue}` : ""} — ${p.url} [${p.key}]`).join("\n");
+    return run.finish("completed", `Found ${r.papers.length} paper(s) online (arXiv and Crossref, read ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC). Their metadata and abstracts are now in the "scholar" collection (research can cite them by DOI/URL) and in your BibTeX library:\n${list}${r.notes.length ? `\nNote: ${r.notes.join(" ")}` : ""}`, true, undefined,
+      { kind: "page", text: list, sources: r.papers.map((p) => ({ title: p.title, path: p.url })), provenance: { ...this.#prov("research.scholar_search", run, true, true) } } as any);
+  }
+
+  /** BibTeX / LaTeX / proposal from a saved research report; every \cite key is checked against the written .bib. */
+  async #export(name: string, format: "latex" | "bibtex" | "proposal", run: Run): Promise<RunReport> {
+    const s = run.step("kb-export", "research.export", `Export research project ${name} as ${format}`);
+    const p = findProject(name, this.o.researchDir);
+    if (!p) { s.fail("not found"); return run.finish("refused", `No research project matches "${name}". Say "list research projects".`, null); }
+    const projDir = path.join(this.o.researchDir ?? defaultResearchDir(), p.id);
+    const v = p.versions.at(-1)!;
+    const md = fs.readFileSync(path.join(projDir, v.report), "utf8");
+    const ev = JSON.parse(fs.readFileSync(path.join(projDir, `evidence-v${v.version}.json`), "utf8")) as { sources: BibSource[]; sections?: { aspect?: string; title?: string; synthesis?: string | null; extracts?: { doc: string; text: string }[] }[] };
+    const keys = keysFor(ev.sources, this.#library());
+    const bib = [...keys.values()].map((k) => k.bib).join("\n\n") + "\n";
+    const bibPath = path.join(projDir, "references.bib");
+    fs.writeFileSync(bibPath, bib, "utf8");
+    const files = [bibPath];
+    if (format !== "bibtex") {
+      const tex = format === "latex" ? reportToLatex(md, keys, `${REPORT_TITLES[p.type]}: ${p.topic}`)
+        : proposalLatex(p.topic, p.question, (ev.sections ?? []).map((x) => ({ title: x.title ?? x.aspect ?? "", synthesis: x.synthesis ?? null, extracts: x.extracts ?? [] })), keys);
+      const texPath = path.join(projDir, format === "latex" ? `report-v${v.version}.tex` : `proposal-v${v.version}.tex`);
+      fs.writeFileSync(texPath, tex, "utf8");
+      files.push(texPath);
+      // Verification: read back; every cited key must exist in references.bib, and the document must be balanced.
+      const back = fs.readFileSync(texPath, "utf8"), bibBack = fs.readFileSync(bibPath, "utf8");
+      const cited = [...back.matchAll(/\\cite\{([^}]+)\}/g)].map((m) => m[1]!);
+      const missing = cited.filter((k) => !bibBack.includes(`{${k},`));
+      const balanced = (back.match(/\\begin\{/g) ?? []).length === (back.match(/\\end\{/g) ?? []).length;
+      if (missing.length || !balanced) { s.fail("verification failed"); return run.finish("failed", `The ${format} file was written but did not verify (${missing.length ? `missing keys: ${missing.join(", ")}` : "unbalanced environments"}).`, null); }
+      s.ok(`${cited.length} citation(s), all in references.bib`);
+    } else s.ok(`${keys.size} entr${keys.size === 1 ? "y" : "ies"}`);
+    return run.finish("completed", `Exported "${p.topic}" (version ${v.version}) as ${format === "proposal" ? "a LaTeX research proposal" : format === "latex" ? "LaTeX" : "BibTeX"}:\n${files.map((f) => `• ${f}`).join("\n")}\nCompile with: pdflatex, then bibtex, then pdflatex twice (any TeX distribution; D-ASK does not need one).${format === "proposal" ? "\nSections the indexed evidence does not cover are marked [To be written by the author]; D-ASK does not invent hypotheses or results." : ""}`, true);
+  }
+
+  /** Offline statistics of ONE CSV/TSV file inside the allowed folders; every number computed here, never by the model. */
+  async #dataset(file: string, run: Run): Promise<RunReport> {
+    const s = run.step("kb-dataset", "research.analyse_dataset", `Analyse the dataset ${file}`);
+    const roots = await this.roots();
+    let full = path.resolve(file);
+    try { full = fs.realpathSync(full); } catch { /* a missing file is reported as unreadable below */ }
+    if (!roots.some((r) => full.toLowerCase().startsWith(r.path.toLowerCase().replace(/[\\/]+$/, "") + path.sep))) { s.fail("outside the allowed folders"); return run.finish("refused", `${file} is outside the folders D-ASK may read (DASK_KNOWLEDGE_ROOTS).`, null); }
+    let buf: Buffer;
+    try { const st = fs.statSync(full); if (!st.isFile() || st.size > 50 * 1024 * 1024) throw new Error("missing or larger than 50 MB"); buf = fs.readFileSync(full); }
+    catch (e) { s.fail("unreadable"); return run.finish("failed", `The dataset cannot be read: ${e instanceof Error ? e.message : e}.`, null); }
+    let a: Analysis;
+    try { a = analyse(full, buf); } catch (e) { s.fail("not a table"); return run.finish("failed", `The file is not a readable table: ${e instanceof Error ? e.message : e}.`, null); }
+    const stamp = new Date().toISOString();
+    const out = path.join(this.o.researchDir ?? defaultResearchDir(), "datasets", `${path.basename(full).replace(/\W+/g, "-")}-${stamp.slice(0, 19).replace(/[-:T]/g, "")}`);
+    fs.mkdirSync(out, { recursive: true });
+    const report = analysisReport(a, stamp);
+    fs.writeFileSync(path.join(out, "report.md"), report, "utf8");
+    fs.writeFileSync(path.join(out, "analysis.json"), JSON.stringify({ ...a, charts: a.charts.map((c) => c.name) }, null, 2), "utf8");
+    for (const c of a.charts) fs.writeFileSync(path.join(out, c.name), c.svg, "utf8");
+    // Reproducibility check: recompute from the same bytes and compare.
+    const again = analyse(full, fs.readFileSync(full));
+    const same = JSON.stringify({ ...again, charts: [] }) === JSON.stringify({ ...a, charts: [] });
+    s.ok(`${a.rows} row(s), ${a.columns.length} column(s)${same ? ", reproduced" : ""}`);
+    const g = a.groupTest;
+    return run.finish(same ? "completed" : "failed",
+      `Analysed ${path.basename(full)} offline: ${a.rows} rows, ${a.numeric.length} numeric and ${a.categorical.length} categorical column(s).` +
+      (a.fit ? `\nStrongest correlation: ${a.fit.y} vs ${a.fit.x}, r = ${Math.sign(a.fit.slope) * Math.sqrt(a.fit.r2) >= 0 ? "" : "-"}${Math.sqrt(a.fit.r2).toFixed(3)} (n=${a.fit.n}).` : "") +
+      (g ? `\nGroup comparison (Welch's t-test): ${g.metric} ${g.levels[0]} vs ${g.levels[1]}: difference ${g.diff.toFixed(3)}, t = ${g.t.toFixed(3)}, p = ${g.p.toFixed(4)}.` : "") +
+      `\nReport, charts and analysis.json: ${out}\nThe analysis was re-computed from the same file and ${same ? "gave identical results" : "DID NOT reproduce — do not rely on it"}.`, same);
   }
 
   /** Reads web pages the user NAMED (optional online feature) and indexes each as one document whose path is its URL. */

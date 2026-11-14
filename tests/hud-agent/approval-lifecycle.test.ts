@@ -245,5 +245,39 @@ console.log("\n[P1/P2] Input approval cards");
     "AL3 an operation that is not 'Open …', or a missing application -> no decision offered");
 }
 
+// ── 2026-11-14: the new cards (complete input, clipboard, Windows administration, the user's Chrome, code edits) ──
+console.log("\n[UC2] New approval cards");
+{
+  const req = (actionType: string, params: Record<string, string>, target = { processName: "powershell.exe", windowTitle: "W", hwnd: 4660, processId: 4321, processCreationTime: null }) => {
+    const action = {
+      schema: "dask.approval.action.v1", approvalId: "apN", actionId: "actN", actionType, parameters: params, parametersSha256: "phash", target,
+      sessionId: "s1", stopGeneration: 1, riskLevel: "Elevated", reason: "D-ASK asks.", createdAtUtc: new Date(T0).toISOString(), expiresAtUtc: new Date(T0 + 30_000).toISOString(),
+    };
+    return { approvalId: "apN", actionId: "actN", actionType, parametersSha256: "phash", actionParameters: params, canonicalAction: JSON.stringify(action), actionDigest: "dN" };
+  };
+  const ctl = { control: "Button #menu", controlType: "Button", controlAutomationId: "menu", controlName: "Menu", inputPolicy: "mouse", execution: "Performed once…" };
+  const sum = (r: ReturnType<typeof parseApprovalRequest>): string => ("view" in r ? r.view.inputSummary ?? "" : `ERROR ${r.error}`);
+  check(sum(parseApprovalRequest(req("Desktop.RightClick", { ...ctl, point: "10,20" }))) === 'Right-click ONCE on Button "Menu" (#menu), at screen point 10,20.', "UC1 right-click card");
+  check(sum(parseApprovalRequest(req("Desktop.DoubleClick", { ...ctl, point: "10,20" }))) === 'Double-click ONCE on Button "Menu" (#menu), at screen point 10,20.', "UC2 double-click card");
+  check(sum(parseApprovalRequest(req("Desktop.Scroll", { ...ctl, point: "10,20", direction: "down", amount: "3" }))) === 'Scroll down 3 wheel notch(es) over Button "Menu" (#menu), at screen point 10,20. Nothing is clicked.', "UC3 scroll card");
+  check("error" in parseApprovalRequest(req("Desktop.Scroll", { ...ctl, point: "10,20", direction: "sideways", amount: "3" })), "UC4 a scroll card with an odd direction is not offered");
+  check(/^Drag Button "Menu" \(#menu\) from 10,20 and drop it ONCE on List "target" at 300,40\.$/.test(sum(parseApprovalRequest(req("Desktop.Drag", { ...ctl, point: "10,20", dropPoint: "300,40", dropControlType: "List", dropControlName: "target" })))), "UC5 drag card names the drop target");
+  check("error" in parseApprovalRequest(req("Desktop.Drag", { ...ctl, point: "10,20" })), "UC6 a drag card without its drop target is not offered");
+  const edit = { controlType: "Edit", control: "Edit #sel", controlAutomationId: "sel", controlName: "", inputPolicy: "keyboard", execution: "…" };
+  check(sum(parseApprovalRequest(req("Desktop.SelectText", { ...edit, selection: "all" }))) === "Select all the text in Edit (#sel). No keys are pressed and nothing is changed.", "UC7 select-all card");
+  check("error" in parseApprovalRequest(req("Desktop.SelectText", { ...edit, text: "quick", textLength: "9" })), "UC8 a selection card whose text and length disagree is not offered");
+  const op = (t: string, p: Record<string, string>) => sum(parseApprovalRequest(req(t, p, { processName: "Windows", windowTitle: "x", hwnd: 0, processId: 1, processCreationTime: null })));
+  check(op("Desktop.ClipboardWrite", { operation: "Put this text on the clipboard (replacing what is there now)", text: "hi", textLength: "2" }) === "Put this text on the clipboard (replacing what is there now).", "UC9 clipboard write card shows the operation (and the text below)");
+  check(op("Desktop.ClipboardWrite", { operation: "Put this text on the clipboard", text: "hi", textLength: "3" }).startsWith("ERROR"), "UC10 a clipboard card whose text length is wrong is not offered");
+  check(op("System.Power", { operation: "Restart the computer in 600 seconds", delaySeconds: "600" }) === "Restart the computer in 600 seconds.", "UC11 power card");
+  check(op("System.EndProcess", { pid: "1" }).startsWith("ERROR"), "UC12 an administration card without its operation is not offered");
+  check(op("Chrome.SensitiveAction", { operation: 'Click "Buy now" on 127.0.0.1 in your Chrome', why: "Separate approval needed" }) === 'Click "Buy now" on 127.0.0.1 in your Chrome.', "UC13 sensitive Chrome card");
+  check(op("Dev.EditFile", { operation: "Change calc.js: replace exactly one passage (shown as a diff below)", diff: "--- calc.js\n+++ calc.js" }).startsWith("Change calc.js"), "UC14 code-edit card (diff listed below it)");
+  const labels = ["Desktop.RightClick", "Desktop.DoubleClick", "Desktop.Scroll", "Desktop.Drag", "Desktop.SelectText", "Desktop.ClipboardRead", "Desktop.ClipboardWrite", "System.EndProcess", "System.ServiceControl",
+    "System.StartupToggle", "System.RadioToggle", "System.SetVolume", "System.SetBrightness", "System.Power", "System.CancelPower", "Chrome.AuthorizeSession", "Chrome.SensitiveAction", "Dev.EditFile"];
+  const lab = (t: string) => { const r = parseApprovalRequest(req(t, { operation: "Do it", point: "1,1", direction: "up", amount: "1", dropPoint: "2,2", dropControlType: "List", selection: "all", ...ctl, ...(t === "Desktop.SelectText" ? edit : {}) })); return "view" in r ? r.view.actionLabel : r.error; };
+  check(labels.every((t) => lab(t) !== t && !/ERROR/.test(lab(t))), "UC15 every new action type has a human label (never the raw type)", labels.map((t) => [t, lab(t)]));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

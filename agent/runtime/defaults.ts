@@ -7,6 +7,7 @@ import { createWorkspaceListDirTool, mathEvaluateTool, systemInfoTool, systemTim
 import { createFilesystemTools, type FileAccessConfig } from "./tools/filesystem";
 import { createDesktopTools, type DesktopBridge } from "./tools/desktop";
 import { createSystemAdminTools } from "./tools/systemAdmin";
+import { createAndroidTools } from "./tools/android";
 import { createChromeTools } from "./tools/chrome";
 import { createDevEditTool } from "./tools/devEdit";
 import { createWorkflowTools } from "./tools/workflows";
@@ -48,6 +49,8 @@ export function createDefaultRegistry(
   if (options.desktop) for (const tool of createDesktopTools(options.desktop)) registry.register(tool);
   // Windows administration (2026-11-14): reads free, changes approved by the daemon; the tools act only if the daemon offers them.
   if (options.desktop) for (const tool of createSystemAdminTools(options.desktop)) registry.register(tool);
+  // Android through adb (2026-11-15): reads free, connect/copy/commands approved by the daemon; only if the daemon offers them.
+  if (options.desktop) for (const tool of createAndroidTools(options.desktop)) registry.register(tool);
   // The user's own Chrome (2026-11-14): only requests that name Chrome; the daemon authorizes the session and sensitive actions.
   if (options.desktop) for (const tool of createChromeTools(options.desktop)) registry.register(tool);
   // Developer code edits (2026-11-14): one exact approved replacement, read back; optional tests through dev.run_task.

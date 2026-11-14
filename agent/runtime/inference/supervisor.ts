@@ -470,16 +470,30 @@ export class InferenceSupervisor {
 
   // ── Orphan cleanup (a previous host that died without stopping its server) ──
 
+  // One PID file PER OWNING HOST (2026-11-14). Before, one shared file per model let a second host that started while the first was
+  // running treat the first host's LIVE server as an orphan and kill it (found by a full-suite load run: the other host's planning call
+  // got ECONNRESET / ECONNREFUSED). A server is an orphan only when the host that started it is gone.
+  #runDir(): string {
+    return path.join(this.#root, "local-inference", "run");
+  }
+
   #pidFile(): string {
-    return path.join(this.#root, "local-inference", "run", `llama-server-${this.#model.id}.json`);
+    return path.join(this.#runDir(), `llama-server-${this.#model.id}-host${process.pid}.json`);
   }
 
   #writePidFile(pid: number | undefined): void {
     if (!pid) return;
     try {
-      fs.mkdirSync(path.dirname(this.#pidFile()), { recursive: true });
-      fs.writeFileSync(this.#pidFile(), JSON.stringify({ pid, startedAt: new Date().toISOString() }));
+      fs.mkdirSync(this.#runDir(), { recursive: true });
+      fs.writeFileSync(this.#pidFile(), JSON.stringify({ pid, ownerPid: process.pid, startedAt: new Date().toISOString() }));
     } catch { /* best effort */ }
+  }
+
+  /** The executable of a running process, or "" when it is not running (or cannot be read). */
+  static #imageOf(pid: number): string {
+    const q = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ExecutablePath`], { encoding: "utf8", windowsHide: true });
+    return (q.stdout ?? "").trim();
   }
 
   #removePidFile(): void {
@@ -489,22 +503,29 @@ export class InferenceSupervisor {
   async #killOrphan(exe: string): Promise<void> {
     if (this.#orphanCheckDone || process.platform !== "win32") return;
     this.#orphanCheckDone = true;
-    let pid: number;
-    try {
-      pid = Number(JSON.parse(fs.readFileSync(this.#pidFile(), "utf8")).pid);
-    } catch {
-      return;
+    const prefix = `llama-server-${this.#model.id}`;
+    let files: string[];
+    try { files = fs.readdirSync(this.#runDir()).filter((f) => f === `${prefix}.json` || (f.startsWith(`${prefix}-host`) && f.endsWith(".json"))); }
+    catch { return; }
+    for (const f of files) {
+      const file = path.join(this.#runDir(), f);
+      let rec: { pid?: unknown; ownerPid?: unknown };
+      try { rec = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+      const pid = Number(rec.pid), owner = Number(rec.ownerPid);
+      if (!Number.isInteger(pid) || pid <= 0) { try { fs.rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
+      // Another host that is still running owns this server: it is NOT an orphan; never touch it or its file.
+      if (Number.isInteger(owner) && owner > 0 && owner !== process.pid) {
+        const ownerImage = InferenceSupervisor.#imageOf(owner);
+        if (ownerImage && /node(\.exe)?$/i.test(ownerImage)) continue;
+      }
+      // Only kill if that PID is still OUR llama-server executable (PIDs are reused).
+      const image = InferenceSupervisor.#imageOf(pid);
+      if (image && path.resolve(image).toLowerCase() === path.resolve(exe).toLowerCase()) {
+        spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        this.#pushLog(`[supervisor] killed orphaned llama-server pid ${pid} (its host ${Number.isInteger(owner) && owner > 0 ? owner : "unknown"} is gone)`);
+      }
+      try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
     }
-    if (!Number.isInteger(pid) || pid <= 0) return;
-    // Only kill if that PID is still OUR llama-server executable (PIDs are reused).
-    const q = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ExecutablePath`], { encoding: "utf8", windowsHide: true });
-    const image = (q.stdout ?? "").trim();
-    if (image && path.resolve(image).toLowerCase() === path.resolve(exe).toLowerCase()) {
-      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      this.#pushLog(`[supervisor] killed orphaned llama-server pid ${pid}`);
-    }
-    this.#removePidFile();
   }
 
   // ── Timers, state, logs ────────────────────────────────────────────────────

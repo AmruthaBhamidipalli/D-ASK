@@ -112,7 +112,10 @@ public sealed class DevEditService : IDesktopActionRequestService
         string after = before[..first] + r + before[(first + f.Length)..];
         string shaBefore = Sha(raw);
         string diff = Diff(before, after, Path.GetFileName(full));
-        if (diff.Length > 3500) diff = diff[..3500] + "\n… (diff truncated on the card)";
+        // The card must show the EXACT change; approval parameters are limited (ActionPolicyEngine.MaxParameterValueChars), so a change too
+        // large to show in full is refused rather than approved from a truncated diff.
+        if (diff.Length > ActionPolicyEngine.MaxParameterValueChars - 100)
+            return DesktopCallResult.Fail("change_too_large", $"This change is too large to show exactly on one approval card ({diff.Length} characters of diff). Split it into smaller replacements. Nothing was changed.");
 
         var parameters = new Dictionary<string, string>
         {

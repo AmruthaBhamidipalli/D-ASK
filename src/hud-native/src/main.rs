@@ -114,6 +114,10 @@ pub enum WebBridgeMessage {
     AgentTaskStatus(ipc::agent_bridge::AgentStatusPayload),
     /// The page may only lower interaction: "ambient" or "hidden".
     SetInteraction { mode: String },
+    /// 2026-11-15: where the Ambient-mode "OPEN CONSOLE" button is (CSS px), or null.
+    ConsoleHandle { rect: Option<[f64; 4]> },
+    /// The user clicked that button. Honoured only when the HOST saw the press over it (never on the page's word alone).
+    OpenConsole,
     HitRegions(HitRegionsPayload),
     ActionApprovalDecision {
         approval_id: String,
@@ -158,6 +162,8 @@ pub enum OverlayHotkey {
 
 #[derive(Debug, Clone)]
 pub enum HudAppEvent {
+    /// A second launch of D-ASK asked this HUD to show its console.
+    ShowConsole,
     IpcTelemetry(Box<protocol::TelemetryUpdate>),
     IpcState(Box<protocol::StateUpdate>),
     IpcAlert(Box<protocol::ResourceAlert>),
@@ -256,7 +262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _single_instance = match acquire_single_instance() {
         Some(guard) => guard,
         None => {
-            eprintln!("Another D-ASK HUD is already running in this session; this one exits without starting.");
+            // 2026-11-15: launching D-ASK again (Start Menu) brings the running HUD's console to the front.
+            signal_show_console();
+            eprintln!("Another D-ASK HUD is already running in this session; it was asked to show its console. This one exits.");
             return Ok(());
         }
     };
@@ -322,6 +330,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (None, None)
     };
+    if let Some(p) = event_proxy.clone() {
+        spawn_show_console_listener(p);
+    }
 
     let native_latch = Arc::new(state::emergency_stop::NativeEmergencyStopLatch::new());
     // Phase 7B.1a: shared with the UI event loop and the hotkey thread; each heartbeat carries their acknowledgements.
@@ -743,9 +754,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Never fall back to interactive: an overlay that takes input without the user asking blocks the desktop.
                 // It stays click-through and says why it can't be made interactive.
                 if !toggle_ok {
-                    warn!("[OVERLAY] Ctrl+Alt+Space is unavailable; staying in ambient mode (click-through). The HUD can't be made interactive until it is restarted without the conflict.");
+                    warn!("[OVERLAY] Ctrl+Alt+Space is unavailable; the console stays reachable with its OPEN CONSOLE button and by launching D-ASK again.");
                 }
-                dispatch_interaction(&webview, &overlay);
+                // 2026-11-15: start with the console usable (the user just launched D-ASK). Interactive takes input only over the
+                // HUD's panels, so the desktop stays usable; Esc or the AMBIENT button releases it. DASK_HUD_START_MODE=ambient keeps
+                // the previous behaviour.
+                if std::env::var("DASK_HUD_START_MODE").map(|v| v.eq_ignore_ascii_case("ambient")).unwrap_or(false) {
+                    dispatch_interaction(&webview, &overlay);
+                } else {
+                    set_overlay_mode(&overlay, &webview, overlay::InteractionMode::Interactive);
+                }
+            }
+            HudAppEvent::ShowConsole => {
+                info!("[OVERLAY] Showing the console (D-ASK was launched again).");
+                set_overlay_mode(&overlay, &webview, overlay::InteractionMode::Interactive);
             }
             HudAppEvent::OverlayHotkeyPressed(key) => {
                 let next = match key {
@@ -890,6 +912,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 payload.viewport[0], payload.viewport[1], payload.viewport[2],
                                 r.right - r.left, r.bottom - r.top, r.left, r.top, window.scale_factor()
                             );
+                        }
+                    }
+                    Ok(WebBridgeMessage::ConsoleHandle { rect }) => {
+                        if let Err(e) = overlay.set_console_handle(rect, window.scale_factor()) {
+                            warn!("[OVERLAY] Refused console button region: {e}");
+                        }
+                    }
+                    Ok(WebBridgeMessage::OpenConsole) => {
+                        if overlay.mode() == overlay::InteractionMode::Ambient && overlay.take_console_handle_click() {
+                            info!("[OVERLAY] Console opened by a click on its button.");
+                            set_overlay_mode(&overlay, &webview, overlay::InteractionMode::Interactive);
+                        } else {
+                            warn!("[OVERLAY] Ignored an OpenConsole request without a click the host saw on the console button.");
                         }
                     }
                     Ok(WebBridgeMessage::ApprovalSurface(p)) => {
@@ -1038,6 +1073,41 @@ fn dispatch_to_frontend<T: serde::Serialize>(webview: &wry::WebView, message: &T
         let script = format!("if (window.__DASK_IPC_DISPATCH__) window.__DASK_IPC_DISPATCH__({});", json);
         let _ = webview.evaluate_script(&script);
     }
+}
+
+fn show_console_event_name() -> Vec<u16> {
+    let name = std::env::var("DASK_HUD_INSTANCE").unwrap_or_else(|_| "D-ASK-HUD".to_string());
+    format!("Local\\{name}-ShowConsole").encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// A second launch signals the running HUD (a per-session named event; it only asks for the console to be shown).
+fn signal_show_console() {
+    use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name = show_console_event_name();
+    unsafe {
+        if let Ok(h) = OpenEventW(EVENT_MODIFY_STATE, false, windows::core::PCWSTR(name.as_ptr())) {
+            let _ = SetEvent(h);
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        }
+    }
+}
+
+fn spawn_show_console_listener(proxy: winit::event_loop::EventLoopProxy<HudAppEvent>) {
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+    let name = show_console_event_name();
+    let handle = match unsafe { CreateEventW(None, false, false, windows::core::PCWSTR(name.as_ptr())) } {
+        Ok(h) => h.0 as isize,
+        Err(e) => { warn!("[OVERLAY] Show-console signal unavailable: {e}"); return; }
+    };
+    std::thread::spawn(move || loop {
+        let h = windows::Win32::Foundation::HANDLE(handle as *mut _);
+        if unsafe { WaitForSingleObject(h, INFINITE) } != windows::Win32::Foundation::WAIT_OBJECT_0 {
+            break;
+        }
+        if proxy.send_event(HudAppEvent::ShowConsole).is_err() {
+            break;
+        }
+    });
 }
 
 /// Holds a named mutex for the life of the process. None when another HUD already holds it.

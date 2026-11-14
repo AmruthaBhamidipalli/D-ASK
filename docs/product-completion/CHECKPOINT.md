@@ -1045,3 +1045,31 @@ Evidence: `results/universal-control-2/*.log` (final-build runs). Nothing commit
 - Daemon suite 669 passed / 6 skipped / 1 intermittent (Phase7B1bLiveTests: passes alone, failed under concurrent load). 36 TS suites all pass (desktop 257, system-admin 40, chrome 22, dev-edit 4, ...). Agent host + frontend + Rust HUD (release) rebuilt. Package NOT rebuilt.
 
 **Not done / limits**: real-profile Chrome needs the user to load the unpacked extension once; Chrome host not yet in the package; display resolution change not offered (read-only); service start/stop needs admin for most services; HUD human-in-the-loop acceptance still deferred.
+
+
+## Release readiness (2026-11-14 ~15:00-17:45): regression reliability, packaging with the Chrome relay, installed + offline acceptance
+
+Full report: `docs/product-completion/RELEASE-READINESS-REPORT.md`. Release candidate: `dist/desktop/D-ASK-20261114T170903` (manifest `d0c1eab6…ff16`, 214 files). Nothing committed.
+
+**Root-caused and fixed (all with regression tests):** shared llama-server PID file -> a second host killed the first host's live model (the intermittent `Phase7B1bLiveTests`); one-retry on a reset model connection; `contentWords()` split paths containing digits (~18 % of copies "unverified"); `files.move` + `office.create_*` missing from the host allowlist (packaged host refused to start with the product profile); plan prompt carried every tool's constraints (6,600 tokens > 4,096 context with 79 tools -> every planned request failed); numeric/boolean arguments not pinnable + stray arguments not forbidden (model added `pid`); 2,000-char approval cap vs code-edit diffs/clipboard; Chrome session not bound to the approving HUD session; MediaPipe hand model fetched online (now shipped).
+
+**Evidence:** load runs `results/regression-reliability/` (repro 1-2 fail; 4-6 and final: daemon 670/0/6 with 36-38 TS suites + frontend build concurrently; final TS 2,192 checks 0 failed); installed RC `results/release-readiness/verify-package-rc-console.log` 32/32; Wi-Fi OFF `results/offline-final/20261114T172051` package 32/32 + integration 8/8, 0 non-loopback connections (208 processes); installed relay + real Chrome `results/release-readiness/install/ChromeLiveTests-rc.log` PASS; install/uninstall logs in `results/release-readiness/install/`. Superseded packages D-ASK-20261114T160238 / T162609 / T165638 (each had one of the defects above) were deleted.
+
+**Packaging:** relay published self-contained single-file at the mirrored path and covered by the manifest; extension + `scripts/chrome/register-native-host.ps1` shipped; Install-D-ASK.ps1 registers the relay (HKCU, `-NoChrome` to skip); Uninstall removes a registration pointing into the install; product profile enables Clipboard, SystemAdmin, ChromeControl.
+
+**Left for the user:** load the extension in the everyday Chrome profile (Chrome requires a person); human-in-the-loop session `docs/product-completion/HITL-ACCEPTANCE.md` (prep: `scripts/hud/hitl-prepare.ps1`). Dev relay registration restored to the repo Release build.
+
+
+## Round 3 (2026-11-15 ~00:00-03:10): Core Console fix, everyday-profile Chrome, display modes, scanned-PDF OCR, research extras, Android/ADB, code signing
+
+Full statuses: `docs/product-completion/RELEASE-READINESS-REPORT.md` section 0. RC `dist/desktop/D-ASK-20261115T023936` (218 manifest files, `09e94423…33b1`) is installed at `%LOCALAPPDATA%\Programs\D-ASK`. Nothing committed.
+
+- **Console**: starts interactive; host-verified OPEN CONSOLE button in ambient mode (`overlay.rs` console handle + press tracking, `main.rs` OpenConsole/ShowConsole, named event `<instance>-ShowConsole` for relaunch); textarea shortcut fix. `scripts/hud/console-access-live.ps1` 7/7 (dev, installed-1). On the new install, the 2 model-answered checks were refused by the memory guard (low free RAM), and the deterministic requests COMPLETED (`results/console-access/installed-*`).
+- **Chrome everyday profile**: PASS (`ChromeLiveTests` with `DASK_CHROME_REAL_PROFILE=1`; harness-approved).
+- **Display**: `system.set_display_mode` + keep-or-rollback (15 s) PASS live.
+- **OCR**: `dask-ocr --pdf`; `extract.ts` OCRs pages without a text layer (`OCR_MARK`); `knowledge-ocr.test.ts` 10/10.
+- **Research**: `knowledge/scholar.ts` (arXiv/Crossref, opt-in `DASK_RESEARCH_ONLINE=1`), `export.ts` (LaTeX/BibTeX), `dataset.ts` (stats, Welch t, SVG charts); `research-extras.test.ts` 30/30.
+- **Android**: `src/DAsk.Daemon/Automation/Android/AndroidService.cs` (`AgentHost:Android`, `AdbPath`, `AndroidFileRoots`), `agent/runtime/tools/android.ts`, approval types `Android.Connect/Transfer/Command`. `AndroidTests.cs` (fake adb) and `android.test.ts` 29/29. Real phone: BLOCKED (no adb/device).
+- **Signing**: `scripts/package/Sign-D-ASK.ps1` (Inventory/Sign/Verify; refuses self-signed/private roots), `build-package.mjs --sign-thumbprint|--sign-pfx|--sign-dlib`, `tests/package/sign-policy.ps1` 7/7. BLOCKED: no trusted certificate; D-ASK is not signed.
+- **Regression**: daemon 678/0/7 skipped; TS 2,276 checks (2 load-only failures pass alone); Rust 71/0/4 ignored.
+- **Left for the user**: install adb + authorize a phone; obtain a trusted code-signing certificate; human-in-the-loop session; re-run the installed console check with ≥3.5 GB RAM free.

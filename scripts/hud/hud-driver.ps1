@@ -1,4 +1,4 @@
-# Drives the real HUD window with real OS mouse and keyboard input and records what it shows.
+﻿# Drives the real HUD window with real OS mouse and keyboard input and records what it shows.
 # It finds controls through UI Automation, then clicks and types with SendInput, so everything goes
 # through the same path as a person using the HUD. It never scripts the page.
 # Input is only sent while the HUD is the foreground window; otherwise it stops instead of typing elsewhere.
@@ -26,6 +26,7 @@ public static class HudInput {
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   static INPUT Key(ushort vk, ushort scan, uint flags) { var i = new INPUT(); i.type = 1; i.u.ki.wVk = vk; i.u.ki.wScan = scan; i.u.ki.dwFlags = flags; return i; }
   public static void Click() { var a = new INPUT[2]; a[0].type = 0; a[0].u.mi.dwFlags = 2; a[1].type = 0; a[1].u.mi.dwFlags = 4; SendInput(2, a, Marshal.SizeOf(typeof(INPUT))); }
+  public static void Button(bool down) { var a = new INPUT[1]; a[0].type = 0; a[0].u.mi.dwFlags = down ? 2u : 4u; SendInput(1, a, Marshal.SizeOf(typeof(INPUT))); }
   public static void Text(string s) { foreach (char c in s) { var a = new[] { Key(0, c, 4), Key(0, c, 4 | 2) }; SendInput(2, a, Marshal.SizeOf(typeof(INPUT))); System.Threading.Thread.Sleep(8); } }
   public static void Vk(ushort vk) { var a = new[] { Key(vk, 0, 0), Key(vk, 0, 2) }; SendInput(2, a, Marshal.SizeOf(typeof(INPUT))); }
   public static void Chord(ushort[] mods, ushort vk) { foreach (var m in mods) { var d = new[] { Key(m, 0, 0) }; SendInput(1, d, Marshal.SizeOf(typeof(INPUT))); } Vk(vk); for (int k = mods.Length - 1; k >= 0; k--) { var u = new[] { Key(mods[k], 0, 2) }; SendInput(1, u, Marshal.SizeOf(typeof(INPUT))); } }

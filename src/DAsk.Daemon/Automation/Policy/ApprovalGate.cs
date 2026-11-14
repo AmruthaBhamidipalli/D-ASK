@@ -41,6 +41,9 @@ public sealed class ApprovalGate
         if (!Available) return (null, DesktopCallResult.Fail("unavailable", "No approval journal or HUD lease is available, so nothing can be approved. Nothing was done."));
         if (string.IsNullOrWhiteSpace(ctx.OwnerSessionId)) return (null, DesktopCallResult.Fail("no_owner", "The task has no owning HUD session, so nobody can approve this."));
         if (_isStopped()) return (null, DesktopCallResult.Fail("emergency_stopped", "Emergency Stop is active; nothing can be requested."));
+        // Everything approved is shown in full; the policy engine (and the HUD) accept at most MaxParameterValueChars per value.
+        if (parameters.FirstOrDefault(p => p.Value.Length > ActionPolicyEngine.MaxParameterValueChars) is { Key: { } longKey })
+            return (null, DesktopCallResult.Fail("too_long_to_show", $"The {longKey} of this request is too long to show exactly on an approval card, so it cannot be approved. Nothing was done."));
         var (allowed, risk, why) = _policy.EvaluatePolicy(actionType, new Dictionary<string, string>(), targetName);
         if (allowed || risk != ActionRiskLevel.Elevated) return (null, DesktopCallResult.Fail("policy_denied", $"The policy does not permit this request ({why})."));
         using var self = Process.GetCurrentProcess();

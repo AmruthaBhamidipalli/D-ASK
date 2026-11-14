@@ -343,7 +343,13 @@ public sealed partial class ChromeService : IDesktopActionRequestService, IDispo
     /// <summary>One approval authorizes controlling THIS connected Chrome until revoked, Emergency Stop, disconnect, restart or the lifetime.</summary>
     private async Task<DesktopCallResult?> EnsureAuthorized(DesktopActionContext ctx, CancellationToken ct)
     {
-        if (SessionActive) return null;
+        if (SessionActive)
+        {
+            // The authorization belongs to the HUD session that approved it: a task owned by any other client asks for its own.
+            string? owner; lock (_lock) owner = _sessionOwner;
+            if (string.Equals(owner, ctx.OwnerSessionId, StringComparison.Ordinal)) return null;
+            await RevokeAsync("another HUD session asked to use Chrome");
+        }
         var parameters = new Dictionary<string, string>
         {
             ["operation"] = "Let D-ASK control your Google Chrome, including sites where you are signed in",

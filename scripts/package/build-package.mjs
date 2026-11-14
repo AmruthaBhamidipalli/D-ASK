@@ -4,6 +4,8 @@
 //
 //   node scripts/package/build-package.mjs [--out <dir>] [--models <id,id>] [--skip-build]
 //   node scripts/package/build-package.mjs --verify [--out <dir>]
+//   signing (optional; a publicly trusted code-signing certificate only): --sign-thumbprint <sha1> | --sign-pfx <file> (password in
+//   DASK_SIGN_PFX_PASSWORD) | --sign-dlib <Azure.CodeSigning.Dlib.dll> --sign-metadata <metadata.json>; [--timestamp-url <url>]
 //
 // The folder layout mirrors the repository on purpose: the daemon and the HUD each allow only the other's exact
 // path relative to themselves, and this keeps that check unchanged. Downloads happen only when this script is run
@@ -29,6 +31,9 @@ const NODE_REL = "runtime/node/node.exe";
 const ENTRY_REL = "dist/agent-host/agent/host/stdioHost.js";
 const DAEMON_DIR = "src/DAsk.Daemon/bin/Release/net8.0";
 const HUD_REL = "src/hud-native/target/release/hud-native.exe";
+// The Chrome native-messaging relay, at the path the daemon expects beside itself (mirrors the repository layout).
+const CHROME_HOST_DIR = "src/DAsk.ChromeHost/bin/Release/net8.0";
+const CHROME_HOST_REL = `${CHROME_HOST_DIR}/dask-chrome-host.exe`;
 
 const log = (s) => console.log(`[package] ${s}`);
 const fail = (s) => { console.error(`[package] ERROR: ${s}`); process.exit(1); };
@@ -133,6 +138,8 @@ async function build() {
     run("npm", ["run", "build:agent-host"]);
     run("npm", ["run", "build"]);
     run("cargo", ["build", "--release", "--bin", "hud-native", "--bin", "dask-ocr"], path.join(ROOT, "src", "hud-native"));
+    run("dotnet", ["publish", "src/DAsk.ChromeHost/DAsk.ChromeHost.csproj", "-c", "Release", "-r", "win-x64", "--self-contained", "true",
+      "-p:PublishSingleFile=true", "-p:PublishTrimmed=true", "-p:DebugType=none", "-o", path.join(OUT, CHROME_HOST_DIR), "--nologo", "-v", "q"]);
     run("dotnet", ["publish", "src/DAsk.Daemon/DAsk.Daemon.csproj", "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", path.join(OUT, DAEMON_DIR), "--nologo", "-v", "q"]);
   }
 
@@ -213,6 +220,14 @@ async function build() {
     log("whisper.cpp runtime and model packaged");
   } else log("whisper.cpp not installed; the package uses the Windows recognizer (install later with scripts/inference/fetch-whisper.mjs)");
 
+  // The user's Chrome: the extension (loaded once by the user from this folder), the relay, and its per-user registration script.
+  if (!fs.existsSync(path.join(OUT, CHROME_HOST_REL))) fail(`the Chrome relay was not built: ${CHROME_HOST_REL}`);
+  fs.mkdirSync(path.join(OUT, "extensions", "dask-chrome"), { recursive: true });
+  for (const f of ["manifest.json", "background.js", "popup.html", "popup.js", "key.json"]) fs.copyFileSync(path.join(ROOT, "extensions", "dask-chrome", f), path.join(OUT, "extensions", "dask-chrome", f));
+  fs.mkdirSync(path.join(OUT, "scripts", "chrome"), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, "scripts", "chrome", "register-native-host.ps1"), path.join(OUT, "scripts", "chrome", "register-native-host.ps1"));
+  log("Chrome relay, extension and registration script packaged");
+
   // Per-user installer and uninstaller (no administrator rights).
   for (const f of ["Install-D-ASK.ps1", "Uninstall-D-ASK.ps1"]) fs.copyFileSync(path.join(ROOT, "scripts/package", f), path.join(OUT, f));
 
@@ -220,8 +235,17 @@ async function build() {
   const electron = walk(OUT).map(rel).filter((r) => /(^|\/)(electron|electron-builder)(\/|\.exe$)|^main\.js$/i.test(r) && !r.startsWith("public/") && !r.startsWith("node_modules/playwright-core/")); // playwright-core ships a JavaScript automation adapter NAMED "electron"; it is not Electron (no runtime, no app)
   if (electron.length) fail(`Electron files in the package: ${electron.slice(0, 5).join(", ")}`);
 
+  // Authenticode (2026-11-15): optional, only with a REAL publicly trusted certificate (Sign-D-ASK.ps1 refuses self-signed / private roots).
+  // Runs BEFORE the manifest is computed because signing changes the files. Without --sign-* the package is built unsigned, as before.
+  const signArgs = argValue("sign-thumbprint") ? ["-Thumbprint", argValue("sign-thumbprint")]
+    : argValue("sign-pfx") ? ["-PfxPath", path.resolve(argValue("sign-pfx"))]
+    : argValue("sign-dlib") ? ["-TrustedSigningDlib", path.resolve(argValue("sign-dlib")), "-TrustedSigningMetadata", path.resolve(argValue("sign-metadata") ?? "")] : null;
+  run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts/package/Sign-D-ASK.ps1"), "-PackageRoot", OUT,
+    "-Mode", signArgs ? "Sign" : "Inventory", ...(signArgs ?? []), ...(argValue("timestamp-url") ? ["-TimestampUrl", argValue("timestamp-url")] : [])]);
+  log(signArgs ? "D-ASK binaries and scripts signed and verified (signing-report.json)" : "NOT SIGNED: no certificate given (signing-inventory.json lists every file's signature status)");
+
   // The manifest: the Node runtime and every file the host can load (including the plugin sandbox).
-  const covered = [path.join(OUT, NODE_REL), ...walk(path.join(OUT, "dist", "agent-host")), ...walk(path.join(OUT, sandboxRel)), ...walk(path.join(OUT, "node_modules", "better-sqlite3")), ...walk(path.join(OUT, "node_modules", "playwright-core"))];
+  const covered = [path.join(OUT, NODE_REL), path.join(OUT, CHROME_HOST_REL), ...walk(path.join(OUT, "extensions", "dask-chrome")), ...walk(path.join(OUT, "dist", "agent-host")), ...walk(path.join(OUT, sandboxRel)), ...walk(path.join(OUT, "node_modules", "better-sqlite3")), ...walk(path.join(OUT, "node_modules", "playwright-core"))];
   const manifest = {
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -298,13 +322,19 @@ async function build() {
     "rem power actions scheduled and cancellable). Services D-ASK may start/stop: add DASK_AgentHost__SystemAdminServices__0=<name> lines.",
     "set DASK_AgentHost__Clipboard=true",
     "set DASK_AgentHost__SystemAdmin=true",
-    "rem Your own Chrome (opt-in; install the D-ASK extension and run scripts\\chrome\\register-native-host.ps1 first):",
-    "rem set DASK_AgentHost__ChromeControl=true",
+    "rem Your own Chrome: inert until you load the D-ASK extension (chrome://extensions > Developer mode > Load unpacked > the extensions\\dask-chrome",
+    "rem folder of this install). Install-D-ASK.ps1 registers the relay for your user; every Chrome session and every consequential click is approved.",
+    "set DASK_AgentHost__ChromeControl=true",
     "rem Approved code edits inside one folder (opt-in):",
     "rem set DASK_AgentHost__DevEditRoots__0=%USERPROFILE%\\source",
     "rem Knowledge (local RAG): folders under Documents may be indexed when you ask (\"index <folder> as <name>\"). Indexing only reads;",
     "rem the index lives in %LOCALAPPDATA%\\D-ASK\\knowledge.db and research reports in Documents\\D-ASK\\Research. Add more folders separated by ;",
     "set DASK_KNOWLEDGE_ROOTS=%USERPROFILE%\\Documents",
+    "rem Online paper discovery (arXiv + Crossref over HTTPS only; everything else stays offline). Opt-in:",
+    "rem set DASK_RESEARCH_ONLINE=1",
+    "rem Android devices through adb (2026-11-15): inert until Android SDK Platform-Tools (adb) is installed and the phone allows USB debugging.",
+    "rem Listing/info are reads; Wi-Fi connect, file copies (Documents\\D-ASK only, SHA-256 verified) and phone commands are approved.",
+    "set DASK_AgentHost__Android=true",
     "",
   ].join("\r\n");
   fs.writeFileSync(path.join(OUT, "features.default.cmd"), profileLines);

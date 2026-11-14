@@ -8,6 +8,7 @@
 import { contentWords } from "../grounding";
 import { requestedBrowserActions } from "./browserActions";
 import { systemRequest } from "./systemAdmin";
+import { androidRequest } from "./android";
 import { chromeRequest } from "./chrome";
 import type { ArgumentDomain, GroundingVerdict, RequestFacet, ToolOutcome, ToolRequestCheck, ToolSpec } from "../types";
 
@@ -103,6 +104,8 @@ export function actuationRefusal(o: string, inputOffered: (tool: string) => bool
   // (approved by the daemon), not refused here, but ONLY when the daemon offers that tool.
   const sys = systemRequest(o);
   if (sys && inputOffered(sys.tool)) return null;
+  const adr = androidRequest(o);
+  if (adr && inputOffered(adr.tool)) return null;
   const chr = chromeRequest(o);
   if (chr && inputOffered(chr.tool)) return null;
   // "Open Notepad [and type …]" is an approval request (desktop.launch_app, then the guarded typing), not refused here, but ONLY
@@ -765,8 +768,11 @@ function inputCheck(tool: InputActionRequest["tool"], bridge: DesktopBridge): To
       }
       if (tool === "desktop.scroll") {
         d.direction = own.length ? { kind: "enum", values: uniq(own.map((a) => a.direction ?? null)), optional: false } : none;
-        // amount is a number (enum domains hold text): it is pinned by ground()/isStep, which compares it exactly.
+        // Numbers are pinned exactly too (2026-11-14): the wheel notches the request states (3 when it states none).
+        d.amount = own.length ? { kind: "enum", values: [...new Set(own.map((a) => a.amount ?? 3))], optional: false } : none;
       }
+      if (tool !== "desktop.drag_element") { d.toControl = { kind: "forbidden", reason: "only a drag has a drop target" }; d.toControlType = d.toControl; }
+      if (tool !== "desktop.scroll") { d.direction = { kind: "forbidden", reason: "only a scroll has a direction" }; d.amount = d.direction; }
       if (tool === "desktop.press_keys") d.keys = own.length ? { kind: "enum", values: uniq(own.map((a) => a.keys)), optional: false } : { kind: "forbidden", reason: "the request names no allowed key" };
       return d;
     },
@@ -1391,7 +1397,7 @@ export const createDesktopTools = (bridge: DesktopBridge): ToolSpec<any, any>[] 
 
 // ── desktop.clipboard_write / desktop.clipboard_read (each approved in the HUD; the daemon verifies a write by reading it back) ──
 
-const CLIP_WRITE = /^\s*(?:please\s+|can you\s+|could you\s+)?(?:copy|put|place|set)\s+["“'‘]([^"”'’]{1,4000})["”'’]\s+(?:to|on|onto|in|into)\s+(?:the\s+|my\s+)?clipboard\s*[.!]?\s*$/i;
+const CLIP_WRITE = /^\s*(?:please\s+|can you\s+|could you\s+)?(?:copy|put|place|set)\s+["“'‘]([^"”'’]{1,1900})["”'’]\s+(?:to|on|onto|in|into)\s+(?:the\s+|my\s+)?clipboard\s*[.!]?\s*$/i;
 const CLIP_READ = /^\s*(?:please\s+|can you\s+|could you\s+)?(?:(?:read|show|tell|paste)\s+(?:me\s+)?(?:what(?:'s|\s+is)\s+(?:on|in)\s+)?(?:the\s+|my\s+)?clipboard|what(?:'s|\s+is)\s+(?:on|in)\s+(?:the\s+|my\s+)?clipboard)\s*[.!?]?\s*$/i;
 export function clipboardRequest(o: string): { tool: "desktop.clipboard_write"; text: string } | { tool: "desktop.clipboard_read" } | null {
   const w = CLIP_WRITE.exec(o);
@@ -1407,7 +1413,7 @@ function createClipboardTool(bridge: DesktopBridge, tool: "desktop.clipboard_wri
     name: tool,
     description: write ? "Put the exact quoted text on the Windows clipboard (approved in the HUD; verified by reading it back)."
       : "Read the text on the Windows clipboard (approved in the HUD; secret-looking text is withheld).",
-    inputSchema: write ? { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 4000 } }, required: ["text"] } : { type: "object", properties: {} },
+    inputSchema: write ? { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 1900 } }, required: ["text"] } : { type: "object", properties: {} },
     permissions: ["request:desktop_action"],
     risk: "medium",
     requiresApproval: false,
@@ -1425,7 +1431,7 @@ function createClipboardTool(bridge: DesktopBridge, tool: "desktop.clipboard_wri
     requestCheck: {
       argumentDomains: (o): Record<string, ArgumentDomain> => {
         const r = req(o);
-        return write ? { text: r && "text" in r ? { kind: "enum", values: [r.text], optional: false } : { kind: "forbidden", reason: "the request quotes no text for the clipboard" } } : {};
+        return write ? { text: r && "text" in r ? { kind: "enum", values: [r.text], optional: false } : { kind: "forbidden", reason: "the request quotes no text for the clipboard" } } : { text: { kind: "forbidden", reason: "reading the clipboard takes no text" } };
       },
       relevant: mine,
       claims: mine,

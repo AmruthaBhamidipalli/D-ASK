@@ -102,10 +102,13 @@ function createChromeTool(bridge: DesktopBridge, spec: (typeof SPECS)[number]): 
     check: (_i, outcome) => (outcome.output?.verified === true ? { ok: true } : { ok: false, reason: "Chrome did not confirm the result" }),
     requestCheck: {
       argumentDomains: (o): Record<string, ArgumentDomain> => {
+        // Every argument pinned before execution (2026-11-14): the request's values, everything else (including tabId) forbidden.
         const r = req(o);
-        if (!r) return { url: { kind: "forbidden", reason: "the request does not ask for this" } };
         const d: Record<string, ArgumentDomain> = {};
-        for (const [k, v] of Object.entries(r.args)) if (typeof v === "string") d[k] = { kind: "enum", values: [v], optional: false };
+        for (const k of ["url", "query", "title", "text", "field", "tabId"]) {
+          const v = r?.args[k];
+          d[k] = v !== undefined ? { kind: "enum", values: [v], optional: false } : { kind: "forbidden", reason: r ? "the request does not give it" : "the request does not ask for this" };
+        }
         return d;
       },
       relevant: mine,

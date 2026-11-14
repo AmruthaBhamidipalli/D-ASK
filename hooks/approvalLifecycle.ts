@@ -97,6 +97,12 @@ const ACTION_LABELS: Record<string, string> = {
   "System.SetBrightness": "Change the screen brightness",
   "System.Power": "Sleep, restart, sign out or shut down",
   "System.CancelPower": "Cancel a scheduled restart or shutdown",
+  "System.SetDisplayMode": "Change the screen resolution",
+  "System.KeepDisplayMode": "Keep the new screen resolution (otherwise it is rolled back)",
+  // Android through adb (2026-11-15).
+  "Android.Connect": "Connect to an Android device over Wi-Fi",
+  "Android.Transfer": "Copy a file to or from your Android device",
+  "Android.Command": "Act on your Android device",
   // Your own Chrome (2026-11-14).
   "Chrome.AuthorizeSession": "Let D-ASK control your Chrome",
   "Chrome.SensitiveAction": "A sensitive action in your Chrome",
@@ -178,7 +184,8 @@ const INPUT_TYPES = new Set(["Desktop.ClickElement", "Desktop.TypeText", "Deskto
   "Desktop.RightClick", "Desktop.DoubleClick", "Desktop.Scroll", "Desktop.Drag", "Desktop.SelectText"]);
 /** 2026-11-14 non-window actions: the daemon's own "operation" sentence is the summary; every parameter is listed below it. */
 const OPERATION_TYPES = new Set(["Desktop.ClipboardRead", "Desktop.ClipboardWrite", "System.EndProcess", "System.ServiceControl", "System.StartupToggle",
-  "System.RadioToggle", "System.SetVolume", "System.SetBrightness", "System.Power", "System.CancelPower", "Chrome.AuthorizeSession", "Chrome.SensitiveAction", "Dev.EditFile"]);
+  "System.RadioToggle", "System.SetVolume", "System.SetBrightness", "System.Power", "System.CancelPower", "System.SetDisplayMode", "System.KeepDisplayMode", "Chrome.AuthorizeSession", "Chrome.SensitiveAction", "Dev.EditFile",
+  "Android.Connect", "Android.Transfer", "Android.Command"]);
 
 /**
  * P1/P2: the exact action in one sentence, from the digest-bound parameters only. Returns an error string when a

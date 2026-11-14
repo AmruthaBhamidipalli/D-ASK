@@ -105,6 +105,20 @@ async function main() {
     const r = await run(d, new Scripted([plan([{ id: "s1", tool: "system.audio_status", input: {} }])]), "What's the volume?");
     check(r.outcome === "completed" && /26%/.test(r.response) && /Realtek/.test(r.response), "E7 a read is answered from the daemon's values", { r: r.response });
   }
+  console.log("\n[P] Every argument pinned before execution (2026-11-14, found by the packaged acceptance run)");
+  {
+    const listOk = { status: "ok", result: { verified: true, count: 1, shown: 1, processes: [{ name: "x", pid: 1, memoryMb: 1, window: "" }], observed: "1 running process(es)" } } as any;
+    const d = new FakeDaemon([listOk]);
+    const r = await run(d, new Scripted([plan([{ id: "s1", tool: "system.list_processes", input: { pid: 0 } }])]), "Show running processes");
+    check(d.calls.every((c) => !("pid" in c.args)), "P1 a stray argument the model adds ('pid' on a process list) never reaches the daemon", { o: r.outcome, c: d.calls });
+    const d2 = new FakeDaemon([{ status: "ok", result: { executed: true, verified: true, volumePercent: 90, observed: "x" } } as any]);
+    await run(d2, new Scripted([plan([{ id: "s1", tool: "system.set_volume", input: { percent: 90 } }])]), "Set the volume to 40%");
+    check(d2.calls.every((c) => (c.args as any).percent === 40), "P2 a different NUMBER than the request's (90 instead of 40) never reaches the daemon", d2.calls);
+    const d3 = new FakeDaemon([{ status: "ok", result: { executed: true, verified: true, observed: "x" } } as any]);
+    await run(d3, new Scripted([plan([{ id: "s1", tool: "system.power", input: { action: "restart", delaySeconds: 30 } }])]), "Restart the computer in 10 minutes");
+    check(d3.calls.every((c) => (c.args as any).delaySeconds === 600), "P3 a shorter power delay than requested never reaches the daemon", d3.calls);
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

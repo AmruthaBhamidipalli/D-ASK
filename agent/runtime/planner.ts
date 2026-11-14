@@ -148,7 +148,11 @@ export class Planner {
 
   async createPlan(req: PlanRequest): Promise<PlanResult> {
     const tools = this.toolsFor(req.objective, req.granted);
-    const argumentDomains = this.domainsFor(req.objective);
+    // Only the OFFERED tools' constraints go into the prompt (2026-11-14): with the full product profile (79 tools) every tool's
+    // constraints made the plan prompt ~6,600 tokens, over the local model's 4,096-token context, so every planned request failed.
+    // Validation (check) and the execution gate still apply every tool's domains.
+    const offeredNames = new Set(tools.map((t) => t.name));
+    const argumentDomains = Object.fromEntries(Object.entries(this.domainsFor(req.objective)).filter(([t]) => offeredNames.has(t)));
     let repairErrors: string[] | undefined;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -280,8 +284,8 @@ export const DEDUPLICATED_TOOLS: ReadonlySet<string> = new Set(["desktop.focus_w
   "desktop.right_click_element", "desktop.double_click_element", "desktop.scroll", "desktop.drag_element", "desktop.select_text",
   "desktop.clipboard_write", "desktop.clipboard_read",
   // Windows administration changes (2026-11-14): each approved separately; a repeat would only ask again for the same change.
-  "system.end_process", "system.service_control", "system.set_radio", "system.set_volume", "system.set_brightness", "system.startup_toggle", "system.power", "system.cancel_power",
-  "dev.edit_file", "chrome.click", "chrome.fill", "chrome.open", "chrome.open_tab", "chrome.authorize", "chrome.revoke",
+  "system.end_process", "system.service_control", "system.set_radio", "system.set_volume", "system.set_brightness", "system.set_display_mode", "system.startup_toggle", "system.power", "system.cancel_power",
+  "dev.edit_file", "android.connect", "android.push", "android.pull", "android.command", "android.list_devices", "android.device_info", "chrome.click", "chrome.fill", "chrome.open", "chrome.open_tab", "chrome.authorize", "chrome.revoke",
   "system.list_processes", "system.list_services", "system.network_status", "system.audio_status", "system.display_status", "system.startup_apps",
   // Browser stage 2: each is separately approved too (a repeat would only be refused by the tool's order gate).
   "browser.click_element", "browser.fill_field",

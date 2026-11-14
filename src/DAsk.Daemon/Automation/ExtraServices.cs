@@ -14,6 +14,12 @@ public static class ExtraServices
         if (o.SystemAdmin)
             yield return new SystemAdmin.SystemAdminService(gate("SystemAdmin"), new SystemAdmin.SystemAdminOptions { Enabled = true, ControllableServices = o.SystemAdminServices },
                 loggers.CreateLogger("SystemAdmin"));
+        if (o.Android)
+            yield return new Android.AndroidService(gate("Android"), new Android.AdbRunner(o.AdbPath), new Android.AndroidOptions
+            {
+                Enabled = true,
+                FileRoots = o.AndroidFileRoots.Length > 0 ? o.AndroidFileRoots : new[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "D-ASK") },
+            }, loggers.CreateLogger("Android"));
         if (o.DevEditRoots.Length > 0)
             yield return new Dev.DevEditService(gate("DevEdit"), new Dev.DevEditOptions { Roots = o.DevEditRoots }, loggers.CreateLogger("DevEdit"));
         if (o.ChromeControl)

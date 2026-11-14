@@ -85,7 +85,23 @@ export class LlamaServerModel implements LanguageModel {
     this.#temperature = opts.temperature ?? DEFAULTS.temperature;
   }
 
+  /**
+   * One structured completion. A connection that is RESET or drops mid-request (the local server crashed or was restarted by its
+   * supervisor, seen under memory pressure on 16 GB with concurrent workloads, 2026-11-14) is retried ONCE: the request has no side
+   * effects, and the endpoint is acquired again, which waits for the supervisor's restart. Cancellation, timeouts, refused connections
+   * with no restart, bad responses and every other error are never retried.
+   */
   async generateJson(req: StructuredRequest): Promise<unknown> {
+    try {
+      return await this.#generateOnce(req);
+    } catch (err) {
+      const transient = err instanceof LocalInferenceError && err.kind === "unavailable" && /\((ECONNRESET|UND_ERR_SOCKET)\)/.test(err.message);
+      if (!transient || req.signal.aborted) throw err;
+      return await this.#generateOnce(req);
+    }
+  }
+
+  async #generateOnce(req: StructuredRequest): Promise<unknown> {
     if (req.signal.aborted) throw new LocalInferenceError("cancelled", "Cancelled before the request was sent");
 
     let endpoint: LocalEndpoint;

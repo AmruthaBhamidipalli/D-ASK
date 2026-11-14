@@ -34,12 +34,12 @@ public sealed class SystemAdminService : IDesktopActionRequestService
     public const string ListServices = "system.list_services", ServiceInfo = "system.service_info", ServiceControl = "system.service_control";
     public const string NetworkStatus = "system.network_status", SetRadio = "system.set_radio";
     public const string AudioStatus = "system.audio_status", SetVolume = "system.set_volume";
-    public const string DisplayStatus = "system.display_status", SetBrightness = "system.set_brightness";
+    public const string DisplayStatus = "system.display_status", SetBrightness = "system.set_brightness", SetDisplayMode = "system.set_display_mode";
     public const string StartupList = "system.startup_apps", StartupToggle = "system.startup_toggle";
     public const string Power = "system.power", CancelPower = "system.cancel_power";
 
     private static readonly string[] ReadTools = { ListProcesses, ProcessInfo, ListServices, ServiceInfo, NetworkStatus, AudioStatus, DisplayStatus, StartupList, CancelPower };
-    private static readonly string[] ChangeTools = { EndProcess, ServiceControl, SetRadio, SetVolume, SetBrightness, StartupToggle, Power };
+    private static readonly string[] ChangeTools = { EndProcess, ServiceControl, SetRadio, SetVolume, SetBrightness, StartupToggle, Power, SetDisplayMode };
     public static readonly IReadOnlyList<string> All = ReadTools.Concat(ChangeTools).ToArray();
     /// <summary>Reads (and cancelling a scheduled power action) do not use the task's single approval budget.</summary>
     public static bool IsUnmetered(string tool) => ReadTools.Contains(tool);
@@ -160,10 +160,14 @@ public sealed class SystemAdminService : IDesktopActionRequestService
                 if (Unknown(a) is { } u) return Bad(u);
                 var b = await FixedPowerShell.RunAsync(FixedPowerShell.Brightness, 20_000, ct);
                 bool supported = b.Ok && b.Json is { } bj && bj.GetProperty("supported").GetBoolean();
+                string? primary = Displays.PrimaryDevice();
+                var modes = primary == null ? new List<Displays.Mode>() : Displays.SupportedModes(primary);
                 return DesktopCallResult.Ok(new { verified = true, displays = Displays.List(), brightnessSupported = supported, brightnessPercent = supported ? b.Json!.Value.GetProperty("percent").GetInt32() : (int?)null,
-                    observed = "displays and brightness read from Windows" });
+                    supportedModes = modes.Select(m => $"{m.Width}x{m.Height} @ {m.RefreshHz} Hz").Take(40),
+                    observed = "displays, supported resolutions and brightness read from Windows" });
             }
             case SetBrightness: return await SetBrightnessAsync(a, ctx, ct);
+            case SetDisplayMode: return await SetDisplayModeAsync(a, ctx, ct);
             case StartupList:
             {
                 if (Unknown(a) is { } u) return Bad(u);
@@ -334,6 +338,73 @@ public sealed class SystemAdminService : IDesktopActionRequestService
         await _gate.AuditAsync(verified ? "Verified" : "Unverified", req!, ctx, $"brightness {before} -> {now}");
         return verified ? DesktopCallResult.Ok(new { executed = true, verified = true, brightnessPercent = now, observed = $"the brightness is now {now}% (read back)" })
             : DesktopCallResult.Fail("execution_unverified", $"D-ASK set the brightness once, but it reads {now}% ({err}).");
+    }
+
+    /// <summary>How long the user has to keep a new display mode before it is rolled back (Windows Settings uses 15 s too).</summary>
+    public static TimeSpan DisplayKeepWindow = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// system.set_display_mode: ONE supported resolution/refresh on the primary display. Tested by the driver first, approved, applied for this
+    /// session only and read back; then "Keep this display mode?" must be approved within DisplayKeepWindow, otherwise (declined, timed out,
+    /// Emergency Stop, HUD unreachable because the screen is unusable) the previous mode is restored and read back. Only a kept mode is saved.
+    /// </summary>
+    private async Task<DesktopCallResult> SetDisplayModeAsync(JsonElement a, DesktopActionContext ctx, CancellationToken ct)
+    {
+        if (Unknown(a, "width", "height", "refreshHz") is { } u) return Bad(u);
+        if (Int(a, "width") is not int w || Int(a, "height") is not int h) return Bad("width and height are required (for example 1280 and 720)");
+        int? hz = Int(a, "refreshHz");
+        string? device = Displays.PrimaryDevice();
+        if (device == null || Displays.Current(device) is not { } before) return DesktopCallResult.Fail("not_supported", "The primary display could not be read. Nothing was changed.");
+        var modes = Displays.SupportedModes(device);
+        var target = modes.Where(m => m.Width == w && m.Height == h && (hz == null || m.RefreshHz == hz)).OrderByDescending(m => m.RefreshHz).FirstOrDefault();
+        if (target == null)
+            return DesktopCallResult.Fail("unsupported_mode", $"{w}x{h}{(hz != null ? $" @ {hz} Hz" : "")} is not a mode this display supports. Supported: {string.Join(", ", modes.Take(12).Select(m => $"{m.Width}x{m.Height}@{m.RefreshHz}"))}.");
+        if (target == before) return DesktopCallResult.Ok(new { executed = false, verified = true, mode = $"{before.Width}x{before.Height} @ {before.RefreshHz} Hz", observed = "the display already uses that mode" });
+        int test = Displays.Apply(device, target, test: true, persist: false);
+        if (test != Displays.DISP_CHANGE_SUCCESSFUL) return DesktopCallResult.Fail("unsupported_mode", $"The display driver rejected that mode in a test (code {test}). Nothing was changed.");
+        string Fmt(Displays.Mode m) => $"{m.Width}x{m.Height} @ {m.RefreshHz} Hz";
+        var parameters = new Dictionary<string, string>
+        {
+            ["operation"] = $"Change the screen resolution to {Fmt(target)}",
+            ["display"] = device, ["currently"] = Fmt(before),
+            ["rollback"] = $"After the change you have {(int)DisplayKeepWindow.TotalSeconds} seconds to keep it; otherwise (or if you can't see the screen) the previous mode comes back automatically.",
+            ["execution"] = "Changed once for this session right after your approval and read back; saved only if you keep it.",
+        };
+        var (req, refusal) = await _gate.RequestAsync(DesktopActionTypes.DisplayModeSet, parameters, "Display", device, "D-ASK asks to change the screen resolution.", ctx, ct);
+        if (refusal != null) return refusal;
+        int applied = Displays.Apply(device, target, test: false, persist: false);
+        await Task.Delay(1500, CancellationToken.None);
+        var now = Displays.Current(device);
+        if (applied != Displays.DISP_CHANGE_SUCCESSFUL || now != target)
+        {
+            Displays.Apply(device, before, test: false, persist: false);
+            await _gate.AuditAsync("Failed", req!, ctx, $"apply code {applied}; read {now}; restored");
+            return DesktopCallResult.Fail("execution_unverified", $"Windows did not switch to {Fmt(target)} (code {applied}); the previous mode {Fmt(before)} was restored.");
+        }
+        // Keep-or-revert: a second approval within the keep window. Anything but an explicit approval restores the previous mode.
+        var keepParams = new Dictionary<string, string>
+        {
+            ["operation"] = $"Keep the new screen resolution {Fmt(target)}",
+            ["previous"] = Fmt(before),
+            ["ifNot"] = $"If you decline, or do nothing for {(int)DisplayKeepWindow.TotalSeconds} seconds, {Fmt(before)} is restored automatically.",
+            ["execution"] = "Saved as your display setting only if you approve.",
+        };
+        var (keepReq, keepRefusal) = await _gate.RequestAsync(DesktopActionTypes.DisplayModeKeep, keepParams, "Display", device, "Keep the new screen resolution?", ctx, CancellationToken.None, DisplayKeepWindow);
+        if (keepRefusal != null || ct.IsCancellationRequested)
+        {
+            int back = Displays.Apply(device, before, test: false, persist: false);
+            await Task.Delay(1500, CancellationToken.None);
+            bool restored = Displays.Current(device) == before;
+            await _gate.AuditAsync(restored ? "RolledBack" : "RollbackUnverified", req!, ctx, $"keep not approved ({keepRefusal?.Error?.Code ?? "cancelled"}); restore code {back}");
+            return restored
+                ? DesktopCallResult.Ok(new { executed = true, verified = true, kept = false, mode = Fmt(before), observed = $"the new mode was not kept ({keepRefusal?.Error?.Code ?? "cancelled"}); {Fmt(before)} was restored and read back" })
+                : DesktopCallResult.Fail("rollback_unverified", $"The new mode was not kept, but restoring {Fmt(before)} could not be confirmed (code {back}). Use Windows Settings > Display.");
+        }
+        int saved = Displays.Apply(device, target, test: false, persist: true);
+        bool ok = saved == Displays.DISP_CHANGE_SUCCESSFUL && Displays.Current(device) == target;
+        await _gate.AuditAsync(ok ? "Verified" : "Unverified", keepReq!, ctx, $"kept {Fmt(target)}; save code {saved}");
+        return ok ? DesktopCallResult.Ok(new { executed = true, verified = true, kept = true, mode = Fmt(target), previous = Fmt(before), observed = $"the screen now uses {Fmt(target)} (read back) and it was saved" })
+            : DesktopCallResult.Fail("execution_unverified", $"The mode was kept but saving it was not confirmed (code {saved}).");
     }
 
     private async Task<DesktopCallResult> StartupToggleAsync(JsonElement a, DesktopActionContext ctx, CancellationToken ct)

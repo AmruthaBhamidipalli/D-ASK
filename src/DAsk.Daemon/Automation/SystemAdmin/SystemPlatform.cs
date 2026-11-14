@@ -210,6 +210,55 @@ public static class Displays
     }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool EnumDisplayDevices(string? device, uint i, ref DISPLAY_DEVICE dd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int ChangeDisplaySettingsEx(string device, ref DEVMODE dm, IntPtr hwnd, uint flags, IntPtr param);
+
+    public sealed record Mode(int Width, int Height, int RefreshHz);
+    private const int DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000, DM_DISPLAYFREQUENCY = 0x400000;
+    private const uint CDS_UPDATEREGISTRY = 0x1, CDS_TEST = 0x2;
+    public const int DISP_CHANGE_SUCCESSFUL = 0;
+
+    /// <summary>The primary display's device name (\\.\DISPLAYn), or null.</summary>
+    public static string? PrimaryDevice()
+    {
+        for (uint i = 0; i < 16; i++)
+        {
+            var dd = new DISPLAY_DEVICE { cb = Marshal.SizeOf<DISPLAY_DEVICE>() };
+            if (!EnumDisplayDevices(null, i, ref dd, 0)) break;
+            if ((dd.StateFlags & 0x1) != 0 && (dd.StateFlags & 0x4) != 0) return dd.DeviceName;
+        }
+        return null;
+    }
+
+    public static Mode? Current(string device)
+    {
+        var dm = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+        return EnumDisplaySettings(device, -1, ref dm) ? new Mode(dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency) : null;
+    }
+
+    /// <summary>Every mode the driver reports for this display at the current colour depth (distinct width/height/refresh), largest first.</summary>
+    public static List<Mode> SupportedModes(string device)
+    {
+        var current = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+        EnumDisplaySettings(device, -1, ref current);
+        var set = new HashSet<Mode>();
+        for (int i = 0; i < 2000; i++)
+        {
+            var dm = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+            if (!EnumDisplaySettings(device, i, ref dm)) break;
+            if (dm.dmBitsPerPel == current.dmBitsPerPel && dm.dmPelsWidth >= 800 && dm.dmPelsHeight >= 600) set.Add(new Mode(dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency));
+        }
+        return set.OrderByDescending(m => m.Width * m.Height).ThenByDescending(m => m.RefreshHz).ToList();
+    }
+
+    /// <summary>Applies a mode. test=true only asks the driver whether it would work. persist=false changes it for this session only.</summary>
+    public static int Apply(string device, Mode m, bool test, bool persist)
+    {
+        var dm = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+        if (!EnumDisplaySettings(device, -1, ref dm)) return -1;
+        dm.dmPelsWidth = m.Width; dm.dmPelsHeight = m.Height; dm.dmDisplayFrequency = m.RefreshHz;
+        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+        return ChangeDisplaySettingsEx(device, ref dm, IntPtr.Zero, test ? CDS_TEST : (persist ? CDS_UPDATEREGISTRY : 0), IntPtr.Zero);
+    }
 
     public static List<object> List()
     {

@@ -12,7 +12,7 @@ export type SystemTool =
   | "system.list_processes" | "system.process_info" | "system.end_process"
   | "system.list_services" | "system.service_info" | "system.service_control"
   | "system.network_status" | "system.set_radio" | "system.audio_status" | "system.set_volume"
-  | "system.display_status" | "system.set_brightness" | "system.startup_apps" | "system.startup_toggle"
+  | "system.display_status" | "system.set_brightness" | "system.set_display_mode" | "system.startup_apps" | "system.startup_toggle"
   | "system.power" | "system.cancel_power";
 
 export interface SystemRequest { tool: SystemTool; args: Record<string, string | number | boolean | undefined> }
@@ -49,7 +49,9 @@ const RULES: [RegExp, (m: RegExpExecArray) => SystemRequest | null][] = [
   [R(String.raw`(mute|unmute)(?:\s+(?:the\s+)?(?:sound|volume|audio|speakers?|computer))?`), (m) => ({ tool: "system.set_volume", args: { mute: m[1]!.toLowerCase() === "mute" } })],
   [R(String.raw`(?:what(?:'s|\s+is)\s+the\s+(?:volume|sound\s+level)|(?:show|list|check)\s+(?:the\s+|my\s+)?(?:audio|sound)\s+(?:devices|settings|status)|audio\s+status|is\s+(?:the\s+sound|my\s+computer)\s+muted)`),
     () => ({ tool: "system.audio_status", args: {} })],
-  // ── display ──
+  // ── display ── (resolution: approved, applied for the session, kept only if confirmed in 15 s, else rolled back)
+  [R(String.raw`(?:set|change|switch)\s+(?:the\s+|my\s+)?(?:screen\s+|display\s+)?resolution\s+to\s+(\d{3,4})\s*(?:x|×|by)\s*(\d{3,4})(?:\s+(?:at|@)\s+(\d{2,3})\s*hz)?`),
+    (m) => ({ tool: "system.set_display_mode", args: { width: Number(m[1]), height: Number(m[2]), ...(m[3] ? { refreshHz: Number(m[3]) } : {}) } })],
   [R(String.raw`(?:set|change|turn)\s+(?:the\s+|screen\s+|my\s+)?(?:screen\s+|display\s+)?brightness\s+(?:to\s+)?(\d{1,3})\s*(?:%|percent)?`), (m) => { const n = Number(m[1]); return n <= 100 ? { tool: "system.set_brightness", args: { percent: n } } : null; }],
   [R(String.raw`(?:what(?:'s|\s+is)\s+(?:the\s+|my\s+)?(?:screen\s+)?(?:resolution|brightness)|(?:show|check|list)\s+(?:the\s+|my\s+)?(?:display|screen|monitor)s?(?:\s+(?:settings|configuration|info|status))?|display\s+(?:settings|status))`),
     () => ({ tool: "system.display_status", args: {} })],
@@ -111,7 +113,7 @@ function evidenceFor(tool: SystemTool, r: any): string {
       return `${wifi}\nRadios: ${radios}\nConnected adapters:\n${up.length ? lines(up) : "• none"}`;
     }
     case "system.audio_status": return r.hasOutput ? `Volume ${r.volumePercent}%${r.muted ? " (muted)" : ""}.${Array.isArray(r.devices) ? `\nAudio devices:\n${lines(r.devices.map((d: any) => `${d.name} (${d.status})`))}` : ""}` : "There is no default audio output device.";
-    case "system.display_status": return `${(r.displays ?? []).map((d: any) => `${d.monitor || d.device}: ${d.width}×${d.height} @ ${d.refreshHz} Hz${d.primary ? " (primary)" : ""}`).join("\n")}\nBrightness: ${r.brightnessSupported ? `${r.brightnessPercent}%` : "not adjustable by apps on this display"}`;
+    case "system.display_status": return `${(r.displays ?? []).map((d: any) => `${d.monitor || d.device}: ${d.width}×${d.height} @ ${d.refreshHz} Hz${d.primary ? " (primary)" : ""}`).join("\n")}\nBrightness: ${r.brightnessSupported ? `${r.brightnessPercent}%` : "not adjustable by apps on this display"}${r.supportedModes?.length ? `\nSupported modes: ${r.supportedModes.slice(0, 12).join(", ")}` : ""}`;
     case "system.startup_apps": return `${r.observed}:\n${lines((r.apps ?? []).map((a: any) => `${a.name} — ${a.enabled ? "enabled" : "disabled"} (${a.source})`))}`;
     default: return `${r.observed ?? "Done"}.`;
   }
@@ -130,6 +132,7 @@ const SPECS: { tool: SystemTool; description: string; change: boolean }[] = [
   { tool: "system.set_volume", description: "Set the volume (percent) or mute/unmute. Approved in the HUD; read back.", change: true },
   { tool: "system.display_status", description: "Displays (resolution, refresh rate) and brightness.", change: false },
   { tool: "system.set_brightness", description: "Set the screen brightness (percent). Approved in the HUD; read back.", change: true },
+  { tool: "system.set_display_mode", description: "Change the screen resolution (and refresh rate) to a supported mode. Approved in the HUD; kept only if confirmed within 15 s, otherwise rolled back.", change: true },
   { tool: "system.startup_apps", description: "Apps that start with Windows and whether each is enabled.", change: false },
   { tool: "system.startup_toggle", description: "Enable or disable ONE current-user startup app (the Task Manager switch). Approved in the HUD; read back.", change: true },
   { tool: "system.power", description: "Schedule sleep, restart, shutdown or sign-out (at least 30 s ahead, default 60 s). Approved in the HUD; cancellable; Emergency Stop cancels it.", change: true },
@@ -149,6 +152,7 @@ function createSystemTool(bridge: DesktopBridge, spec: (typeof SPECS)[number]): 
     filter: { type: "string", maxLength: 60 }, pid: { type: "integer", minimum: 1 }, name: { type: "string", maxLength: 80 }, action: { type: "string", maxLength: 20 },
     radio: { type: "string", enum: ["wifi", "bluetooth"] }, state: { type: "string", enum: ["on", "off"] }, percent: { type: "integer", minimum: 0, maximum: 100 },
     mute: { type: "boolean" }, enabled: { type: "boolean" }, delaySeconds: { type: "integer", minimum: 30, maximum: 3600 },
+    width: { type: "integer", minimum: 640, maximum: 8192 }, height: { type: "integer", minimum: 480, maximum: 8192 }, refreshHz: { type: "integer", minimum: 24, maximum: 500 },
   };
   return {
     name: spec.tool,
@@ -178,11 +182,15 @@ function createSystemTool(bridge: DesktopBridge, spec: (typeof SPECS)[number]): 
     },
     check: (_i, outcome) => (outcome.output?.verified === true ? { ok: true } : { ok: false, reason: "the result was not confirmed by reading Windows' state back" }),
     requestCheck: {
+      // EVERY argument is pinned before execution (2026-11-14): the request's values exactly (text, numbers, switches), and every other
+      // argument forbidden. Found by the packaged acceptance run: the local model added "pid" to "Show running processes".
       argumentDomains: (o): Record<string, ArgumentDomain> => {
         const r = req(o);
         const d: Record<string, ArgumentDomain> = {};
-        if (!r) return { name: { kind: "forbidden", reason: "the request does not ask for this" } };
-        for (const [k, v] of Object.entries(r.args)) if (typeof v === "string") d[k] = { kind: "enum", values: [v], optional: false };
+        for (const k of Object.keys(props)) {
+          const v = r?.args[k];
+          d[k] = v !== undefined ? { kind: "enum", values: [v], optional: false } : { kind: "forbidden", reason: r ? "the request does not give it" : "the request does not ask for this" };
+        }
         return d;
       },
       relevant: mine,

@@ -102,6 +102,11 @@ public class DevEditTests
         rig.BeforeDecision = () => File.AppendAllText(calc, "// edited elsewhere\r\n");
         Assert.Equal("target_changed", (await rig.Do(new { file = calc, find = "// calculator", replace = "// CALC" })).Error?.Code);
         Assert.Contains("// calculator", File.ReadAllText(calc));
+        // A change too large to show exactly on one card is refused up front (never approved from a truncated diff).
+        rig.BeforeDecision = null;
+        string shaNow = DevEditService.Sha(File.ReadAllBytes(calc));
+        Assert.Equal("change_too_large", (await rig.Do(new { file = calc, find = "// calculator", replace = "// " + new string('x', 2500) })).Error?.Code);
+        Assert.Equal(shaNow, DevEditService.Sha(File.ReadAllBytes(calc)));
         Assert.True((await rig.Recorder.VerifyAuditChainAsync()).Ok);
     }
 }

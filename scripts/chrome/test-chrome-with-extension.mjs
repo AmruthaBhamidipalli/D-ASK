@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const ext = path.resolve(here, "..", "..", "extensions", "dask-chrome");
+const ext = process.env.DASK_CHROME_EXTENSION_DIR ?? path.resolve(here, "..", "..", "extensions", "dask-chrome");
 const chromeExe = process.argv[2] || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 let browser;
 try {

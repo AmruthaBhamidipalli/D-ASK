@@ -15,6 +15,7 @@
 // network listener in this process; llama-server listens on loopback under the supervisor.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { allowlistedGet } from "../runtime/knowledge/scholar";
 import { DaemonCallBridge } from "./desktopBridge";
 import { claimStdout, runStdioHost, scrubCloudCredentials, takeToken } from "./stdio";
 import { AgentRuntime } from "../runtime/runtime";
@@ -159,6 +160,8 @@ if (process.env.DASK_AGENT_KNOWLEDGE !== "0") {
       store, embedder: embedder.available() ? embedder : null, model, log: io.log,
       // Optional online research: the SAME policy-locked local browser as browser.read_page, only when browser reading is enabled (AgentHost:BrowserRead).
       ...(browser ? { fetchPage: (url: string, signal: AbortSignal) => browser!.read(url, signal) } : {}),
+      // Optional online paper discovery (2026-11-15): arXiv + Crossref only, over HTTPS, when DASK_RESEARCH_ONLINE=1. Offline-first: off by default.
+      ...(process.env.DASK_RESEARCH_ONLINE === "1" ? { scholarGet: allowlistedGet } : {}),
       workspaceRoot: process.env.DASK_WORKSPACE_ROOT || root!,
       extraRoots: [...rootsFromEnv(process.env.DASK_KNOWLEDGE_ROOTS), ...rootsFromEnv(process.env.DASK_FS_ROOTS)],
     });
