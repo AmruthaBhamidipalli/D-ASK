@@ -243,6 +243,18 @@ console.log("\n[P1/P2] Input approval cards");
     "AL2 arguments, or an executable that is not the named application -> no decision offered");
   check("error" in parseApprovalRequest(inputReq("App.Launch", { ...aCommon, operation: "Run something" })) && "error" in parseApprovalRequest(inputReq("App.Launch", { ...aCommon, application: "" })),
     "AL3 an operation that is not 'Open …', or a missing application -> no decision offered");
+  // 2026-11-16: an installed application (catalog). Previously EVERY such card was refused here, so "open Word" could never be approved.
+  const cCommon = { operation: "Open Word ready for typing", application: "Word", kind: "desktop program", target: "C:\\Program Files\\Microsoft Office\\Root\\Office16\\WINWORD.EXE",
+    arguments: "/w", opens: "a new blank document", registeredBy: "start-menu", result: "Windows starts Word…", reversible: "Yes: close the window.", execution: "Performed once…" };
+  const cl = parseApprovalRequest(inputReq("App.Launch", cCommon));
+  check("view" in cl && /starts C:\\Program Files\\Microsoft Office\\Root\\Office16\\WINWORD\.EXE with the arguments \/w, which opens a new blank document/.test(cl.view.inputSummary ?? ""),
+    "AL4 installed-app card: the program and its exact arguments are summarised (never 'no arguments')", cl);
+  const cs = parseApprovalRequest(inputReq("App.Launch", { ...cCommon, operation: "Search the web in Google Chrome", application: "Google Chrome", target: "C:\\chrome.exe",
+    arguments: "\"https://www.google.com/search?q=news\"", opens: "https://www.google.com/search?q=news" }));
+  check("view" in cs && /Search the web in Google Chrome/.test(cs.view.inputSummary ?? ""), "AL5 a web-search launch card is offered with its exact address", cs);
+  check("error" in parseApprovalRequest(inputReq("App.Launch", { ...cCommon, target: "" })) && "error" in parseApprovalRequest(inputReq("App.Launch", { ...cCommon, operation: "Run cmd" }))
+    && "error" in parseApprovalRequest(inputReq("App.Launch", { ...cCommon, arguments: "a\nb" })),
+    "AL6 a missing program, another operation or a control character -> no decision offered");
 }
 
 // ── 2026-11-14: the new cards (complete input, clipboard, Windows administration, the user's Chrome, code edits) ──
